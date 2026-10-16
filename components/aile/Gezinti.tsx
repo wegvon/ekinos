@@ -6,7 +6,7 @@ import { Ikon, type IkonAdi } from "./Ikon";
 
 const OGELER: { yol: string; ad: string; ikon: IkonAdi; eslesme: RegExp }[] = [
     { yol: "/oyna", ad: "Oyunlar", ikon: "grid", eslesme: /^\/oyna/ },
-    { yol: "/katil", ad: "Odaya katıl", ikon: "people", eslesme: /^\/(katil|oda)/ },
+    { yol: "/katil", ad: "Katıl", ikon: "people", eslesme: /^\/(katil|oda|oturum)/ },
     { yol: "/profil", ad: "Profilim", ikon: "user", eslesme: /^\/profil/ },
 ];
 

@@ -1,56 +1,50 @@
 import type { OyunKimligi } from "./tipler";
 
-// Family-mode games as shown in the app. Only games with `acik: true` can
-// open rooms; the others are announced with their agreed rules (spec §6).
+// The games a session draws from, as shown in the app (spec section 6).
 
 export interface AileOyunKarti {
-    slug: string;
-    oyun: OyunKimligi | null;
+    oyun: OyunKimligi;
     ad: string;
     etiket: string;
     kisa: string;
     aciklama: string;
     kurallar: string[];
     sure: string;
-    acik: boolean;
+    /** One line shown in the countdown and on the board. */
+    ipucu: string;
 }
 
 export const AILE_KATALOGU: AileOyunKarti[] = [
     {
-        slug: "sayi-avi",
         oyun: "sayi-avi",
         ad: "Sayı Avı",
         etiket: "Dikkat",
         kisa: "Sayıları sırayla bul. Gözlerin ne kadar hızlı?",
-        aciklama:
-            "Herkeste aynı sayılar, aynı başlangıç. 1’den 25’e sırayla dokun. En kısa sürede bitiren kazansın.",
+        aciklama: "Herkeste aynı sayılar, aynı başlangıç. 1’den 25’e sırayla dokun. En kısa sürede bitiren kazansın.",
         kurallar: [
-            "Herkes hazır olduğunda oda sahibi turu başlatır.",
-            "1’den başla, 25’e kadar sayıları sırayla bul. Yanlış dokunuş sonucuna 2 saniye ekler.",
-            "En çok 90 saniyen var. Bitirince diğerlerini bekle; sonuçları birlikte görün.",
+            "1’den başla, 25’e kadar sayıları sırayla bul.",
+            "Yanlış dokunuş sonucuna 2 saniye ekler.",
+            "En çok 90 saniyen var. Bitiremeyenler buldukları sayıya göre sıralanır.",
         ],
         sure: "En çok 90 sn",
-        acik: true,
+        ipucu: "1’den 25’e sırayla dokun. Yanlış dokunuş +2 sn.",
     },
     {
-        slug: "hafiza-kartlari",
-        oyun: null,
+        oyun: "hafiza-kartlari",
         ad: "Hafıza Kartları",
         etiket: "Hafıza",
         kisa: "Eşleri aklında tut. En az hamlede tamamla.",
-        aciklama:
-            "Herkeste aynı 16 kart. İkişer aç, 8 çifti bul. 90 saniye içinde tamamlayanlar arasında daha az hamle yapan kazanır.",
+        aciklama: "Herkeste aynı 16 kart. İkişer aç, 8 çifti bul. Daha az hamlede tamamlayan kazanır.",
         kurallar: [
             "Kartların yerleri herkeste aynıdır; açtığın kartlar yalnızca kendi ekranında görünür.",
-            "Eşleşmeyen iki kart kısa bir süre sonra tekrar kapanır.",
+            "Eşleşmeyen iki kart, bir sonraki karta dokununca kapanır.",
             "Hamleler eşitse daha kısa süre kazanır. Bitiremeyenler buldukları çift sayısına göre sıralanır.",
         ],
         sure: "En çok 90 sn",
-        acik: false,
+        ipucu: "İkişer kart aç, 8 çifti en az hamlede bul.",
     },
     {
-        slug: "buyuk-hangisi",
-        oyun: null,
+        oyun: "buyuk-hangisi",
         ad: "Büyük Hangisi?",
         etiket: "Hız",
         kisa: "Büyük sayıya dokun. Hızlı düşün, doğru seç.",
@@ -61,12 +55,40 @@ export const AILE_KATALOGU: AileOyunKarti[] = [
             "Eşit puanlı oyuncular aynı sırayı paylaşır.",
         ],
         sure: "30 sn",
-        acik: false,
+        ipucu: "Büyük sayıya dokun. Doğru +1, yanlış −1.",
+    },
+    {
+        oyun: "renk-tuzagi",
+        ad: "Renk Tuzağı",
+        etiket: "Odak",
+        kisa: "Kelimeyi değil, rengini seç. Kafan karışmasın.",
+        aciklama: "Ekranda bir renk adı yazar ama başka bir renkle boyanmıştır. Yazının rengini seç.",
+        kurallar: [
+            "Kelimenin ne yazdığına değil, hangi renkle yazıldığına bak.",
+            "Her doğru yanıt +1, her yanlış yanıt −1 puan. Toplam puan sıfırın altına düşmez.",
+            "30 saniye sonunda en çok puanı olan kazanır; eşitler aynı sırayı paylaşır.",
+        ],
+        sure: "30 sn",
+        ipucu: "Yazının rengini seç, kelimeyi değil.",
+    },
+    {
+        oyun: "kutu-say",
+        ad: "Kutu Say",
+        etiket: "Göz",
+        kisa: "Kutuları bir bakışta say. Doğru sayıyı seç.",
+        aciklama: "Izgarada birkaç kutu dolu. Kaç tane olduğunu olabildiğince hızlı say ve doğru sayıya dokun.",
+        kurallar: [
+            "Herkes aynı ızgaraları aynı sırayla görür.",
+            "Her doğru yanıt +1, her yanlış yanıt −1 puan. Toplam puan sıfırın altına düşmez.",
+            "30 saniye sonunda en çok puanı olan kazanır; eşitler aynı sırayı paylaşır.",
+        ],
+        sure: "30 sn",
+        ipucu: "Dolu kutuları say, doğru sayıya dokun.",
     },
 ];
 
 export function katalogdan(slug: string) {
-    return AILE_KATALOGU.find((k) => k.slug === slug);
+    return AILE_KATALOGU.find((k) => k.oyun === slug);
 }
 
 export function oyunKarti(oyun: OyunKimligi) {

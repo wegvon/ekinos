@@ -46,6 +46,7 @@ export function veritabaniAc(dosya: string) {
     // A process restart loses in-memory rooms; rounds that were still running
     // are recorded as interrupted, never as completed.
     db.prepare("UPDATE aile_turlari SET durum = 'kesildi' WHERE durum = 'suruyor'").run();
+    db.prepare("UPDATE aile_oyun_oturumlari SET durum = 'kesildi' WHERE durum = 'suruyor'").run();
     return db;
 }
 

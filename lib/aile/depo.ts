@@ -1,41 +1,70 @@
 import type Database from "better-sqlite3";
-import type { KesinSonuc, TurKaydi } from "./oda";
-import type { OyunKimligi, SonucDurumu } from "./tipler";
+import type { KesinSonuc, KesinToplam, OturumKaydi, TurKaydi } from "./oda";
+import type { OyunKimligi } from "./tipler";
 
-// Persistence for family rounds. A round row is written when play actually
-// starts; results are written once, in one transaction, when it ends.
+// Persistence for family sessions and their rounds. A session row is written
+// when it starts, a round row when its play actually starts; results are
+// written once, in one transaction, when each ends.
 
-export interface ProfilTuru {
-    turId: string;
-    oyun: OyunKimligi;
+export interface ProfilOturumu {
+    oturumId: string;
     baslangic: number;
     sira: number;
+    puan: number;
     oyuncuSayisi: number;
-    durum: SonucDurumu;
-    nihaiMs: number | null;
-    hata: number;
-    ilerleme: number;
+    ayrildi: boolean;
+    oyunlar: OyunKimligi[];
 }
 
 export function aileDeposu(db: Database.Database) {
+    const oturumEkle = db.prepare(
+        `INSERT INTO aile_oyun_oturumlari (id, oda_kodu, oyunlar_json, baslangic, durum) VALUES (?, ?, ?, ?, 'suruyor')`
+    );
+    const oturumTamamla = db.prepare(
+        "UPDATE aile_oyun_oturumlari SET durum = 'tamamlandi', bitis = ? WHERE id = ? AND durum = 'suruyor'"
+    );
+    const oturumKes = db.prepare(
+        "UPDATE aile_oyun_oturumlari SET durum = 'kesildi' WHERE id = ? AND durum = 'suruyor'"
+    );
+    const toplamEkle = db.prepare(
+        `INSERT INTO aile_oturum_sonuclari (oturum_id, kullanici_id, sira, puan, oyuncu_sayisi, ayrildi)
+         VALUES (?, ?, ?, ?, ?, ?)`
+    );
     const turEkle = db.prepare(
-        `INSERT INTO aile_turlari (id, oda_kodu, oyun, kural_surumu, icerik_json, baslangic, bitis, durum)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'suruyor')`
+        `INSERT INTO aile_turlari (id, oda_kodu, oturum_id, oturum_sirasi, oyun, kural_surumu, icerik_json, baslangic, bitis, durum)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'suruyor')`
     );
     const turTamamla = db.prepare(
         "UPDATE aile_turlari SET durum = 'tamamlandi' WHERE id = ? AND durum = 'suruyor'"
     );
     const turKes = db.prepare("UPDATE aile_turlari SET durum = 'kesildi' WHERE id = ? AND durum = 'suruyor'");
     const sonucEkle = db.prepare(
-        `INSERT INTO aile_sonuclari (tur_id, kullanici_id, durum, sira, oyuncu_sayisi, ham_ms, hata, ilerleme, nihai_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO aile_sonuclari (tur_id, kullanici_id, durum, sira, oyuncu_sayisi, ham_ms, hata, ilerleme, nihai_ms, puan, tur_puani)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     return {
+        oturumBasladi(o: OturumKaydi) {
+            oturumEkle.run(o.id, o.odaKodu, JSON.stringify(o.oyunlar), o.baslangic);
+        },
+
+        /** Returns false when the session was already settled; nothing is written twice. */
+        oturumBitti: db.transaction((oturumId: string, toplamlar: KesinToplam[], simdi: number) => {
+            if (oturumTamamla.run(simdi, oturumId).changes === 0) return false;
+            for (const t of toplamlar) toplamEkle.run(oturumId, t.id, t.sira, t.puan, t.oyuncuSayisi, t.ayrildi ? 1 : 0);
+            return true;
+        }),
+
+        oturumKesildi(oturumId: string) {
+            oturumKes.run(oturumId);
+        },
+
         turBasladi(tur: TurKaydi) {
             turEkle.run(
                 tur.id,
                 tur.odaKodu,
+                tur.oturumId,
+                tur.oturumSirasi,
                 tur.oyun,
                 tur.kuralSurumu,
                 JSON.stringify(tur.icerik),
@@ -48,7 +77,9 @@ export function aileDeposu(db: Database.Database) {
         turBitti: db.transaction((turId: string, sonuclar: KesinSonuc[]) => {
             if (turTamamla.run(turId).changes === 0) return false;
             for (const s of sonuclar) {
-                sonucEkle.run(turId, s.id, s.durum, s.sira, s.oyuncuSayisi, s.hamMs, s.hata, s.ilerleme, s.nihaiMs);
+                sonucEkle.run(
+                    turId, s.id, s.durum, s.sira, s.oyuncuSayisi, s.hamMs, s.hata, s.ilerleme, s.nihaiMs, s.puan, s.turPuani
+                );
             }
             return true;
         }),
@@ -57,24 +88,31 @@ export function aileDeposu(db: Database.Database) {
             turKes.run(turId);
         },
 
-        /** Was the most recent round in this room cut off by a server restart? */
+        /** Was the most recent session under this code cut off by a server restart? */
         sonTurKesildiMi(odaKodu: string, simdi: number) {
             const satir = db
-                .prepare("SELECT durum, bitis FROM aile_turlari WHERE oda_kodu = ? ORDER BY baslangic DESC LIMIT 1")
-                .get(odaKodu) as { durum: string; bitis: number } | undefined;
-            return satir?.durum === "kesildi" && simdi - satir.bitis < 60 * 60_000;
+                .prepare(
+                    `SELECT durum, baslangic FROM aile_oyun_oturumlari WHERE oda_kodu = ? ORDER BY baslangic DESC LIMIT 1`
+                )
+                .get(odaKodu) as { durum: string; baslangic: number } | undefined;
+            return satir?.durum === "kesildi" && simdi - satir.baslangic < 2 * 60 * 60_000;
         },
 
-        profilGecmisi(kullaniciId: string, limit = 20): ProfilTuru[] {
-            return db
+        profilGecmisi(kullaniciId: string, limit = 20): ProfilOturumu[] {
+            const satirlar = db
                 .prepare(
-                    `SELECT t.id AS turId, t.oyun, t.baslangic, s.sira, s.oyuncu_sayisi AS oyuncuSayisi,
-                            s.durum, s.nihai_ms AS nihaiMs, s.hata, s.ilerleme
-                     FROM aile_sonuclari s JOIN aile_turlari t ON t.id = s.tur_id
-                     WHERE s.kullanici_id = ? AND t.durum = 'tamamlandi'
-                     ORDER BY t.baslangic DESC LIMIT ?`
+                    `SELECT o.id AS oturumId, o.baslangic, o.oyunlar_json AS oyunlarJson, s.sira, s.puan,
+                            s.oyuncu_sayisi AS oyuncuSayisi, s.ayrildi
+                     FROM aile_oturum_sonuclari s JOIN aile_oyun_oturumlari o ON o.id = s.oturum_id
+                     WHERE s.kullanici_id = ? AND o.durum = 'tamamlandi'
+                     ORDER BY o.baslangic DESC LIMIT ?`
                 )
-                .all(kullaniciId, limit) as ProfilTuru[];
+                .all(kullaniciId, limit) as (Omit<ProfilOturumu, "oyunlar" | "ayrildi"> & { oyunlarJson: string; ayrildi: number })[];
+            return satirlar.map(({ oyunlarJson, ayrildi, ...s }) => ({
+                ...s,
+                ayrildi: ayrildi === 1,
+                oyunlar: JSON.parse(oyunlarJson) as OyunKimligi[],
+            }));
         },
     };
 }

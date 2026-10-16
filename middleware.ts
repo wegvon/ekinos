@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 const handleI18nRouting = createMiddleware(routing);
 
 const AILE_HESAP_YOLLARI = /^\/(giris|kayit|sifre)\/?$/;
-const AILE_KORUNAN_YOLLAR = /^\/(oyna|katil|profil|oda)(\/|$)/;
+const AILE_KORUNAN_YOLLAR = /^\/(oyna|katil|profil|oda|oturum)(\/|$)/;
 
 export default async function middleware(request: NextRequest) {
     const pathname = request.nextUrl.pathname;

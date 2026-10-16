@@ -1,7 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 import type { AileDeposu } from "./depo";
 import { Oda, type OdaKullanicisi } from "./oda";
-import { aileOyunuMu } from "./oyunlar";
+import { aileOyunuMu, TUM_OYUNLAR } from "./oyunlar";
 import {
     ODA_KODU_ALFABESI,
     ODA_KODU_UZUNLUGU,
@@ -12,7 +12,7 @@ import {
     type SunucuMesaji,
 } from "./tipler";
 
-// Owns every live room in this process and routes socket traffic to them.
+// Owns every live session in this process and routes socket traffic to them.
 
 export interface Soket {
     send(veri: string): void;
@@ -38,7 +38,8 @@ export class OdaYoneticisi {
     constructor(
         private depo: AileDeposu,
         private saat: () => number = Date.now,
-        private rastgele: (n: number) => number = (n) => randomInt(n)
+        private rastgele: (n: number) => number = (n) => randomInt(n),
+        private oyunHavuzu: readonly OyunKimligi[] = TUM_OYUNLAR
     ) {}
 
     baslat() {
@@ -64,16 +65,22 @@ export class OdaYoneticisi {
         }
     }
 
-    odaKur(sahip: OdaKullanicisi, oyun: OyunKimligi, ad: string | null) {
+    odaKur(sahip: OdaKullanicisi, ad: string | null) {
         const kod = this.yeniKod();
-        const oda = new Oda(kod, oyun, ad, sahip, this.saat(), {
+        const oda = new Oda(kod, ad, sahip, this.saat(), {
             gonder: (baglantiId, mesaj) => this.gonder(baglantiId, mesaj),
+            oturumBasladi: (oturum) => this.depo.oturumBasladi(oturum),
+            oturumBitti: (oturumId, toplamlar, simdi) => {
+                this.depo.oturumBitti(oturumId, toplamlar, simdi);
+            },
+            oturumKesildi: (oturumId) => this.depo.oturumKesildi(oturumId),
             turBasladi: (tur) => this.depo.turBasladi(tur),
             turBitti: (turId, sonuclar) => {
                 this.depo.turBitti(turId, sonuclar);
             },
             turKesildi: (turId) => this.depo.turKesildi(turId),
             odaKapandi: (k) => this.odalar.delete(k),
+            oyunHavuzu: this.oyunHavuzu,
             rastgele: this.rastgele,
             yeniId: () => randomUUID(),
         });
@@ -149,11 +156,11 @@ export class OdaYoneticisi {
             case "hamle":
                 oda.hamle(kim, m.turId, m.sira, m.deger, simdi);
                 return;
-            case "bir_el_daha":
-                hata = oda.birElDaha(kim, simdi);
+            case "devam":
+                hata = oda.devam(kim, simdi);
                 break;
-            case "oyun_degistir":
-                hata = oda.oyunDegistir(kim, aileOyunuMu(m.oyun) ? m.oyun : null, simdi);
+            case "yeni_oturum":
+                hata = oda.yeniOturum(kim, simdi);
                 break;
             case "ayril":
                 oda.ayril(kim, simdi);
@@ -188,8 +195,14 @@ export class OdaYoneticisi {
 
 const globalYonetici = globalThis as unknown as { __ekinosOdalar?: OdaYoneticisi };
 
+/** `AILE_OYUN_HAVUZU=sayi-avi,kutu-say` limits which games sessions draw from. */
+export function oyunHavuzuOku(deger = process.env.AILE_OYUN_HAVUZU): OyunKimligi[] {
+    const secilen = (deger ?? "").split(",").map((s) => s.trim()).filter(aileOyunuMu);
+    return secilen.length > 0 ? [...new Set(secilen)] : TUM_OYUNLAR;
+}
+
 export function odaYoneticisiniKur(depo: AileDeposu) {
-    globalYonetici.__ekinosOdalar ??= new OdaYoneticisi(depo);
+    globalYonetici.__ekinosOdalar ??= new OdaYoneticisi(depo, Date.now, (n) => randomInt(n), oyunHavuzuOku());
     globalYonetici.__ekinosOdalar.baslat();
     return globalYonetici.__ekinosOdalar;
 }
@@ -197,6 +210,6 @@ export function odaYoneticisiniKur(depo: AileDeposu) {
 /** The process-wide manager, created by the custom server at startup. */
 export function odaYoneticisi() {
     const yonetici = globalYonetici.__ekinosOdalar;
-    if (!yonetici) throw new Error("Oda yöneticisi başlatılmadı: uygulama server.ts ile çalıştırılmalı.");
+    if (!yonetici) throw new Error("Oturum yöneticisi başlatılmadı: uygulama server.ts ile çalıştırılmalı.");
     return yonetici;
 }

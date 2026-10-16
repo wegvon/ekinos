@@ -16,6 +16,7 @@ export const sayiAvi: AileOyunu<number[], SayiAviDurumu> = {
     id: "sayi-avi",
     kuralSurumu: "sayi-avi@1",
     sureMs: 90_000,
+    puanli: false,
 
     icerikUret(rastgele) {
         const sayilar = Array.from({ length: SAYI_AVI_HUCRE }, (_, i) => i + 1);
@@ -50,6 +51,7 @@ export const sayiAvi: AileOyunu<number[], SayiAviDurumu> = {
             ilerleme: durum.beklenen - 1,
             toplam: SAYI_AVI_HUCRE,
             hatalar: durum.hatalar,
+            puan: null,
             bitti: durum.bitisMs !== null,
             hamMs: durum.bitisMs,
             cezaMs,
@@ -57,7 +59,6 @@ export const sayiAvi: AileOyunu<number[], SayiAviDurumu> = {
         };
     },
 
-    // Negative: a ranks above b. Zero: shared place.
     karsilastir(a, b) {
         const oa = sayiAvi.ozet(a);
         const ob = sayiAvi.ozet(b);

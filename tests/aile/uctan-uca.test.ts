@@ -24,7 +24,16 @@ let gunluk = "";
 async function sunucuyuAc() {
     sunucu = spawn(process.execPath, ["dist/server.js"], {
         cwd: KOK,
-        env: { ...process.env, NODE_ENV: "production", PORT: String(PORT), HOSTNAME: "127.0.0.1", DATABASE_PATH: DB },
+        env: {
+            ...process.env,
+            NODE_ENV: "production",
+            PORT: String(PORT),
+            HOSTNAME: "127.0.0.1",
+            DATABASE_PATH: DB,
+            // Every game is Sayı Avı here so the test can play all five; the
+            // other games' rules are covered in oda.test.ts.
+            AILE_OYUN_HAVUZU: "sayi-avi",
+        },
         stdio: ["ignore", "pipe", "pipe"],
     });
     let buCalisma = "";
@@ -111,7 +120,7 @@ class Istemci {
     }
 }
 
-describe.skipIf(!HAZIR)("uçtan uca: iki hesap, bir oda, bir Sayı Avı turu", () => {
+describe.skipIf(!HAZIR)("uçtan uca: iki hesap, bir oturum, beş oyun", () => {
     const cerez: Record<string, string> = {};
 
     beforeAll(sunucuyuAc);
@@ -139,13 +148,18 @@ describe.skipIf(!HAZIR)("uçtan uca: iki hesap, bir oda, bir Sayı Avı turu", (
         expect(yonlenen.headers.get("location")).toContain("/giris?sonra=%2Foyna");
         const acik = await istek("/oyna", undefined, cerez.anne);
         expect(acik.status).toBe(200);
-        expect(await acik.text()).toContain("Birlikte daha eğlenceli.");
+        const sayfa = await acik.text();
+        expect(sayfa).toContain("Birlikte daha eğlenceli.");
+        for (const ad of ["Sayı Avı", "Hafıza Kartları", "Büyük Hangisi?", "Renk Tuzağı", "Kutu Say"]) expect(sayfa).toContain(ad);
+        // Links shared before rooms became sessions still lead somewhere.
+        const eski = await istek("/oda/ABCDEF", undefined, cerez.anne);
+        expect(eski.headers.get("location")).toContain("/oturum/ABCDEF");
         // The legacy single-player leaderboard still answers from SQLite.
         expect((await istek("/api/leaderboard?gameId=schulte-table")).status).toBe(200);
     });
 
-    it("oda kurulur, kimliksiz veya yabancı kökenli soket reddedilir, tam bir tur oynanır", async () => {
-        const kurulan = await istek("/api/aile/oda", { oyun: "sayi-avi", ad: "Akşam oyunları" }, cerez.anne);
+    it("oturum açılır, kimliksiz veya yabancı kökenli soket reddedilir, beş oyun sırayla oynanır", async () => {
+        const kurulan = await istek("/api/aile/oturum", { ad: "Akşam oyunları" }, cerez.anne);
         expect(kurulan.status).toBe(200);
         const { kod } = (await kurulan.json()) as { kod: string };
         expect(kod).toMatch(/^[A-HJ-NP-Z2-9]{6}$/);
@@ -188,33 +202,52 @@ describe.skipIf(!HAZIR)("uçtan uca: iki hesap, bir oda, bir Sayı Avı turu", (
         await new Promise((r) => setTimeout(r, 300));
         for (let n = 1; n <= 25; n++) cocuk.dokun(tur.id, n);
 
-        const sonuc = await anne.bekle((o) => o.asama === "sonuc");
-        const [birinci, ikinci] = sonuc.sonuclar!;
-        expect(birinci).toMatchObject({ ad: "anne", sira: 1, durum: "bitirdi", hata: 0 });
-        expect(ikinci).toMatchObject({ ad: "cocuk", sira: 2, durum: "bitirdi", hata: 1, cezaMs: 2000 });
+        const sonuc = await anne.bekle((o) => o.asama === "tur_sonucu");
+        const [birinci, ikinci] = sonuc.turSonuclari!;
+        expect(birinci).toMatchObject({ ad: "anne", sira: 1, durum: "bitirdi", hata: 0, turPuani: 2 });
+        expect(ikinci).toMatchObject({ ad: "cocuk", sira: 2, durum: "bitirdi", hata: 1, cezaMs: 2000, turPuani: 1 });
         expect(ikinci.nihaiMs).toBe(ikinci.hamMs! + 2000);
         expect(birinci.hamMs!).toBeGreaterThan(0);
         expect(birinci.hamMs!).toBeLessThan(5000);
+        expect(sonuc.oyunlar).toHaveLength(5);
+        expect(sonuc.araBitis).toBeGreaterThan(Date.now());
 
-        // Rematch: same room and code, readiness reset, fresh board.
-        cocuk.gonder({ t: "bir_el_daha" });
+        // Games 2–5: the owner skips each break; anne finishes first every time.
+        for (let no = 1; no < 5; no++) {
+            cocuk.gonder({ t: "devam" });
+            await cocuk.bekle(() => cocuk.mesajlar.some((m) => m.t === "hata" && m.kod === "yetki_yok"));
+            anne.gonder({ t: "devam" });
+            const sonraki = (await anne.bekle((o) => o.oyunNo === no && o.asama === "geri_sayim")).tur!;
+            await new Promise((r) => setTimeout(r, Math.max(0, sonraki.baslangic - Date.now()) + 150));
+            for (let n = 1; n <= 25; n++) anne.dokun(sonraki.id, n);
+            await new Promise((r) => setTimeout(r, 200));
+            for (let n = 1; n <= 25; n++) cocuk.dokun(sonraki.id, n);
+            await anne.bekle((o) => o.oyunNo === no && (o.asama === "tur_sonucu" || o.asama === "bitti"));
+        }
+        const bitti = await anne.bekle((o) => o.asama === "bitti");
+        expect(bitti.toplamlar.map((t) => [t.ad, t.sira, t.puan])).toEqual([["anne", 1, 10], ["cocuk", 2, 5]]);
+
+        // Same group again: same code, readiness reset, a fresh session.
+        cocuk.gonder({ t: "yeni_oturum" });
         const yeniden = await anne.bekle((o) => o.asama === "bekleme");
         expect(yeniden.kod).toBe(kod);
         expect(yeniden.oyuncular.map((p) => p.hazir)).toEqual([false, true]);
+        expect(yeniden.toplamlar).toEqual([]);
 
         anne.ws.close();
         cocuk.ws.close();
-    });
+    }, 60_000);
 
     it("profil geçmişi turu gösterir; şifreler veritabanında ve günlükte düz metin değildir", async () => {
         const profil = await istek("/profil", undefined, cerez.cocuk);
         const html = await profil.text();
-        expect(html).toContain("Oyun geçmişin");
+        expect(html).toContain("Oturum geçmişin");
         expect(html).toContain("Sayı Avı");
-        expect(html).toContain("2.");
+        expect(html).toMatch(/5(<!-- -->)? puan/);
 
         const db = new Database(DB, { readonly: true });
-        expect((db.prepare("SELECT COUNT(*) AS n FROM aile_sonuclari").get() as { n: number }).n).toBe(2);
+        expect((db.prepare("SELECT COUNT(*) AS n FROM aile_sonuclari").get() as { n: number }).n).toBe(10);
+        expect(db.prepare("SELECT durum FROM aile_oyun_oturumlari").all()).toEqual([{ durum: "tamamlandi" }]);
         db.close();
         const ham = Buffer.concat(
             [DB, `${DB}-wal`].filter((f) => fs.existsSync(f)).map((f) => fs.readFileSync(f))
@@ -225,8 +258,8 @@ describe.skipIf(!HAZIR)("uçtan uca: iki hesap, bir oda, bir Sayı Avı turu", (
         }
     });
 
-    it("sunucu yeniden başlayınca hesaplar kalır, yarıdaki tur kazanılmış sayılmaz", async () => {
-        const { kod } = (await (await istek("/api/aile/oda", { oyun: "sayi-avi" }, cerez.anne)).json()) as { kod: string };
+    it("sunucu yeniden başlayınca hesaplar kalır, yarıdaki oturum kazanılmış sayılmaz", async () => {
+        const { kod } = (await (await istek("/api/aile/oturum", {}, cerez.anne)).json()) as { kod: string };
         const anne = new Istemci(kod, cerez.anne);
         const cocuk = new Istemci(kod, cerez.cocuk);
         await Promise.all([anne.acildi, cocuk.acildi]);
@@ -252,6 +285,7 @@ describe.skipIf(!HAZIR)("uçtan uca: iki hesap, bir oda, bir Sayı Avı turu", (
         const db = new Database(DB, { readonly: true });
         expect(db.prepare("SELECT durum FROM aile_turlari WHERE id = ?").get(tur.id)).toEqual({ durum: "kesildi" });
         expect((db.prepare("SELECT COUNT(*) AS n FROM aile_sonuclari WHERE tur_id = ?").get(tur.id) as { n: number }).n).toBe(0);
+        expect(db.prepare("SELECT o.durum FROM aile_oyun_oturumlari o JOIN aile_turlari t ON t.oturum_id = o.id WHERE t.id = ?").get(tur.id)).toEqual({ durum: "kesildi" });
         db.close();
     });
 });

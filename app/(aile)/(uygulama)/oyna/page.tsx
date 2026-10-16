@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { Ikon } from "@/components/aile/Ikon";
+import { OturumAcFormu } from "@/components/aile/OturumAcFormu";
 import { OyunKapagi } from "@/components/aile/OyunKapagi";
 import { AILE_KATALOGU } from "@/lib/aile/katalog";
+import { OTURUM_OYUN_SAYISI } from "@/lib/aile/tipler";
 
 export const metadata = { title: "Oyunlar" };
 
@@ -11,37 +13,38 @@ export default function OyunlarSayfasi() {
             <div className="page-title">
                 <div>
                     <h1>Birlikte daha eğlenceli.</h1>
-                    <p>Bir oyun seç. Aileni çağır. Küçük bir rekabet başlasın.</p>
+                    <p>Bir oturum aç. Aileni çağır. {OTURUM_OYUN_SAYISI} oyunluk tatlı bir rekabet başlasın.</p>
                 </div>
                 <span className="chip outline"><Ikon ad="people" />2–8 kişi</span>
             </div>
             <div className="play-together">
                 <div>
                     <div className="eyebrow">Bu akşamın planı</div>
-                    <h2>Bir oda, herkes oyunda.</h2>
-                    <p>Telefon, tablet, bilgisayar… Herkes kendi cihazından katılsın, aynı anda başlayın.</p>
+                    <h2>Bir oturum, {OTURUM_OYUN_SAYISI} oyun.</h2>
+                    <p>Herkes kendi cihazından katılsın. Oyunlar rastgele sırayla gelir, puanlar oyun oyun toplanır.</p>
                 </div>
                 <div className="together-actions">
-                    <Link className="btn warm" href="/oyna/sayi-avi#oda-kur"><Ikon ad="plus" />Oda kur</Link>
+                    <a className="btn warm" href="#oturum-ac"><Ikon ad="plus" />Oturum aç</a>
                     <Link className="text-link" href="/katil">Kodla katıl <Ikon ad="arrow" /></Link>
                 </div>
             </div>
-            <div className="section-heading">
+            <OturumAcFormu />
+            <div className="section-heading spaced">
                 <div>
-                    <h2>Ailece kapışalım</h2>
-                    <p>Kısa turlar. Aynı oyun. Tatlı rekabet.</p>
+                    <h2>Oturumda neler var?</h2>
+                    <p>Her oturumda bu oyunlar karışık sırayla gelir.</p>
                 </div>
                 <span className="chip green">Birlikte oyna</span>
             </div>
             <div className="games">
                 {AILE_KATALOGU.map((oyun) => (
-                    <Link key={oyun.slug} className={`game-card${oyun.acik ? "" : " coming"}`} href={`/oyna/${oyun.slug}`}>
-                        <OyunKapagi slug={oyun.slug} etiket={oyun.acik ? oyun.etiket.toLocaleUpperCase("tr-TR") : "YAKINDA"} />
+                    <Link key={oyun.oyun} className="game-card" href={`/oyna/${oyun.oyun}`}>
+                        <OyunKapagi slug={oyun.oyun} etiket={oyun.etiket.toLocaleUpperCase("tr-TR")} />
                         <div className="game-info">
                             <h3>{oyun.ad}</h3>
                             <p>{oyun.kisa}</p>
                             <div className="bottom">
-                                <span>2–8 kişi · {oyun.sure}</span>
+                                <span>{oyun.sure}</span>
                                 <span className="arrow-disc"><Ikon ad="arrow" /></span>
                             </div>
                         </div>

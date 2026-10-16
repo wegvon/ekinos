@@ -74,10 +74,11 @@ npm test            # server tests; the end-to-end suite needs `npm run build` f
 
 ## 👨‍👩‍👧 Ekinos family app
 
-Turkish, account-based rooms where 2–8 family members play the same puzzle at the same time on their own devices. Routes: `/kayit`, `/giris`, `/oyna`, `/katil`, `/oda/KOD`, `/profil`. The public site under `/` and `/zh` is unchanged.
+Turkish, account-based sessions ("oturum") where 2–8 family members play five random games in a row, at the same time, each on their own device: Sayı Avı, Hafıza Kartları, Büyük Hangisi?, Renk Tuzağı and Kutu Say. Each game awards rank points (first place gets one point per player); the session ends with the totals. Routes: `/kayit`, `/giris`, `/oyna`, `/katil`, `/oturum/KOD` (old `/oda/KOD` links redirect), `/profil`. The public site under `/` and `/zh` is unchanged.
 
 - **Accounts**: username + password only (Argon2id hashes, HttpOnly session cookie). No e-mail.
-- **Rooms**: in memory, in this single process. A restart ends running rounds (shown as "kesildi"); accounts and finished rounds stay in SQLite.
+- **Sessions**: in memory, in this single process. A restart ends running sessions (shown as "kesildi"); accounts, finished sessions and their rounds stay in SQLite. The code calls a session's group an "oda", since "oturum" already names login sessions.
+- **Game pool**: `AILE_OYUN_HAVUZU=sayi-avi,kutu-say` limits which games sessions draw from (default: all five). With fewer than five, games repeat but never back to back.
 - **Password reset**: there is no e-mail recovery. An operator issues a temporary password, which the user must change at next sign-in:
   `node dist/hesap-sifre-sifirla.js <username>` inside the container (`npm run hesap:sifre-sifirla -- <username>` in development).
 
@@ -90,8 +91,8 @@ docker run -p 3000:3000 -v ekinos-data:/data ekinos
 
 - Mount a persistent volume at `/data` (holds `ekinos.db`); back it up like any SQLite file.
 - Serve it over HTTPS behind the proxy and make sure WebSocket upgrades on `/ws` are passed through (Coolify's Traefik does this by default).
-- `APP_ORIGIN` (e.g. `https://ekinos.example`) pins the allowed origin for sign-in and room requests; without it the forwarded `Host` is used.
-- Run a single instance: rooms live in process memory.
+- `APP_ORIGIN` (e.g. `https://ekinos.example`) pins the allowed origin for sign-in and session requests; without it the forwarded `Host` is used.
+- Run a single instance: sessions live in process memory.
 - Plain-HTTP testing on a LAN needs `COOKIE_SECURE=false`, otherwise browsers drop the session cookie.
 
 ## 📄 License

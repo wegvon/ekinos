@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Ikon } from "@/components/aile/Ikon";
-import { OdaKurFormu } from "@/components/aile/OdaKurFormu";
 import { OyunKapagi } from "@/components/aile/OyunKapagi";
 import { katalogdan } from "@/lib/aile/katalog";
 
@@ -16,16 +15,12 @@ export default async function OyunDetaySayfasi({ params }: { params: Promise<{ s
         <>
             <Link className="text-link back" href="/oyna"><Ikon ad="back" />Oyunlara dön</Link>
             <div className="detail-layout">
-                <OyunKapagi slug={oyun.slug} buyuk />
+                <OyunKapagi slug={oyun.oyun} buyuk />
                 <div className="detail-copy">
-                    <span className="chip green">{oyun.etiket} · 2–8 kişi · {oyun.sure}</span>
+                    <span className="chip green">{oyun.etiket} · {oyun.sure}</span>
                     <h1>{oyun.ad}</h1>
                     <p>{oyun.aciklama}</p>
-                    {oyun.acik ? (
-                        <a className="btn primary" href="#oda-kur">Bu oyunla oda kur <Ikon ad="arrow" /></a>
-                    ) : (
-                        <p className="banner info">Bu oyunun aile modu yakında geliyor. Şimdilik Sayı Avı ile oda kurabilirsin.</p>
-                    )}
+                    <Link className="btn primary" href="/oyna#oturum-ac">Oturum aç <Ikon ad="arrow" /></Link>
                 </div>
             </div>
             <div className="panel spaced">
@@ -33,11 +28,8 @@ export default async function OyunDetaySayfasi({ params }: { params: Promise<{ s
                 <ol className="rules">
                     {oyun.kurallar.map((k) => <li key={k}>{k}</li>)}
                 </ol>
-                {oyun.slug === "sayi-avi" && (
-                    <p className="note">Sonuç = bitirme süresi + her yanlış dokunuş için 2 saniye. Düşük sonuç daha iyi.</p>
-                )}
+                <p className="note">Bu oyun oturumlarda rastgele sırayla gelir. Her oyunda birinci, oyuncu sayısı kadar puan alır.</p>
             </div>
-            {oyun.acik && oyun.oyun && <OdaKurFormu oyun={oyun.oyun} oyunAdi={oyun.ad} />}
         </>
     );
 }

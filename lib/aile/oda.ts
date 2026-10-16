@@ -1,12 +1,14 @@
-import { AILE_OYUNLARI, aileOyunuMu } from "./oyunlar";
+import { AILE_OYUNLARI, oyunSirasiSec } from "./oyunlar";
 import type { AileOyunu } from "./oyunlar/oyun";
 import {
+    ARA_MS,
     GERI_SAYIM_MS,
     HAREKETSIZ_ODA_MS,
     ILERLEME_ARALIGI_MS,
     KOPMA_PENCERESI_MS,
     ODA_EN_AZ_OYUNCU,
     ODA_KAPASITESI,
+    OTURUM_OYUN_SAYISI,
     type BenimTurum,
     type IlerlemeGorunumu,
     type IslemHatasi,
@@ -17,11 +19,14 @@ import {
     type SonucDurumu,
     type SonucSatiri,
     type SunucuMesaji,
+    type ToplamSatiri,
 } from "./tipler";
 
-// One family room: lobby, shared countdown, a server-validated round and
-// results. Pure state machine: time, randomness, sockets and storage come in
-// from outside so every rule can be tested by advancing a fake clock.
+// One family session ("oturum" in the product): a lobby, then five random
+// games in a row, each with a shared countdown, a server-validated round and
+// a short break showing the round and the running totals; then the final
+// standings. Pure state machine: time, randomness, sockets and storage come
+// in from outside so every rule can be tested by advancing a fake clock.
 
 export interface OdaKullanicisi {
     id: string;
@@ -32,6 +37,8 @@ export interface OdaKullanicisi {
 export interface TurKaydi {
     id: string;
     odaKodu: string;
+    oturumId: string;
+    oturumSirasi: number;
     oyun: OyunKimligi;
     kuralSurumu: string;
     icerik: unknown;
@@ -39,16 +46,32 @@ export interface TurKaydi {
     bitis: number;
 }
 
+export interface OturumKaydi {
+    id: string;
+    odaKodu: string;
+    oyunlar: OyunKimligi[];
+    baslangic: number;
+}
+
 export interface KesinSonuc extends SonucSatiri {
+    oyuncuSayisi: number;
+}
+
+export interface KesinToplam extends ToplamSatiri {
     oyuncuSayisi: number;
 }
 
 export interface OdaCevresi {
     gonder(baglantiId: string, mesaj: SunucuMesaji): void;
+    oturumBasladi(oturum: OturumKaydi): void;
+    oturumBitti(oturumId: string, toplamlar: KesinToplam[], simdi: number): void;
+    oturumKesildi(oturumId: string): void;
     turBasladi(tur: TurKaydi): void;
     turBitti(turId: string, sonuclar: KesinSonuc[]): void;
     turKesildi(turId: string): void;
     odaKapandi(kod: string): void;
+    /** Games a session may draw from. */
+    oyunHavuzu: readonly OyunKimligi[];
     rastgele(n: number): number;
     yeniId(): string;
 }
@@ -66,11 +89,25 @@ interface Katilimci extends OdaKullanicisi {
     disarida: SonucDurumu | null;
 }
 
+interface Skor extends OdaKullanicisi {
+    katilmaSirasi: number;
+    puan: number;
+}
+
 interface AktifTur extends TurKaydi {
     katilimcilar: Map<string, Katilimci>;
     kaydedildi: boolean;
     ilerlemeDegisti: boolean;
     sonIlerlemeYayini: number;
+}
+
+interface AktifOturum {
+    id: string;
+    oyunlar: OyunKimligi[];
+    oyunNo: number;
+    skorlar: Map<string, Skor>;
+    araBitis: number | null;
+    sonuclandi: boolean;
 }
 
 export type BaglanSonucu = { ok: true; oncekiBaglanti: string | null } | { ok: false; hata: KatilmaHatasi };
@@ -82,12 +119,12 @@ export class Oda {
     private sahipId: string;
     private katilmaSayaci = 0;
     private sonEtkinlik: number;
+    private oturum: AktifOturum | null = null;
     private tur: AktifTur | null = null;
-    private sonuclar: KesinSonuc[] | null = null;
+    private turSonuclari: KesinSonuc[] | null = null;
 
     constructor(
         readonly kod: string,
-        public oyun: OyunKimligi,
         readonly ad: string | null,
         sahip: OdaKullanicisi,
         simdi: number,
@@ -104,7 +141,12 @@ export class Oda {
     }
 
     private get oyunKurali(): AileOyunu<unknown, unknown> {
-        return AILE_OYUNLARI[this.tur?.oyun ?? this.oyun];
+        return AILE_OYUNLARI[this.tur!.oyun];
+    }
+
+    /** The lobby and the final standings take newcomers; a running session does not. */
+    private get acikKapi() {
+        return this.asama === "bekleme" || this.asama === "bitti";
     }
 
     private oyuncuEkle(kullanici: OdaKullanicisi, baglantiId: string | null, simdi: number) {
@@ -130,9 +172,13 @@ export class Oda {
             mevcut.baglantiId = baglantiId;
             mevcut.koptuZaman = null;
         } else {
-            if (this.asama === "geri_sayim" || this.asama === "oynaniyor") return { ok: false, hata: "tur_suruyor" };
+            // Someone who dropped out of a running session keeps their place in it.
+            const geriDonen = !this.acikKapi && this.oturum?.skorlar.has(kullanici.id);
+            if (!this.acikKapi && !geriDonen) return { ok: false, hata: "tur_suruyor" };
             if (this.oyuncular.size >= ODA_KAPASITESI) return { ok: false, hata: "dolu" };
             this.oyuncuEkle(kullanici, baglantiId, simdi);
+            const skor = this.oturum?.skorlar.get(kullanici.id);
+            if (skor) this.oyuncular.get(kullanici.id)!.katilmaSirasi = skor.katilmaSirasi;
         }
         this.sonEtkinlik = simdi;
         this.durumuYayinla();
@@ -145,9 +191,6 @@ export class Oda {
         oyuncu.baglantiId = null;
         oyuncu.koptuZaman = simdi;
         oyuncu.hazir = false;
-        if (this.asama === "geri_sayim" && this.tur?.katilimcilar.has(kullaniciId)) {
-            this.geriSayimiIptalEt();
-        }
         this.ilerlet(simdi);
         if (!this.kapali) this.durumuYayinla();
     }
@@ -157,13 +200,7 @@ export class Oda {
         if (!oyuncu) return;
         if (oyuncu.baglantiId) this.cevre.gonder(oyuncu.baglantiId, { t: "kapandi", sebep: "ayrildin" });
         this.oyuncular.delete(kullaniciId);
-        const katilimci = this.tur?.katilimcilar.get(kullaniciId);
-        if (this.asama === "geri_sayim" && katilimci) {
-            this.geriSayimiIptalEt();
-        } else if (katilimci && !katilimci.disarida && !this.oyunKurali.ozet(katilimci.durum).bitti) {
-            katilimci.disarida = "ayrildi";
-            this.tur!.ilerlemeDegisti = true;
-        }
+        this.turdanDus(kullaniciId, "ayrildi");
         if (this.sahipId === kullaniciId) this.sahipligiDevret();
         this.sonEtkinlik = simdi;
         this.ilerlet(simdi);
@@ -191,41 +228,46 @@ export class Oda {
         if (bagli.length < ODA_EN_AZ_OYUNCU) return "az_oyuncu";
         if (bagli.some((o) => !o.hazir)) return "hazir_degil";
 
-        const kural = AILE_OYUNLARI[this.oyun];
-        const icerik = kural.icerikUret((n) => this.cevre.rastgele(n));
-        const baslangic = simdi + GERI_SAYIM_MS;
-        this.tur = {
+        const rastgele = (n: number) => this.cevre.rastgele(n);
+        this.oturum = {
             id: this.cevre.yeniId(),
-            odaKodu: this.kod,
-            oyun: this.oyun,
-            kuralSurumu: kural.kuralSurumu,
-            icerik,
-            baslangic,
-            bitis: baslangic + kural.sureMs,
-            katilimcilar: new Map(
-                bagli
-                    .sort((a, b) => a.katilmaSirasi - b.katilmaSirasi)
-                    .map((o) => [
-                        o.id,
-                        { id: o.id, ad: o.ad, renk: o.renk, durum: kural.baslangicDurumu(icerik), sonSira: 0, disarida: null },
-                    ])
+            oyunlar: oyunSirasiSec(this.cevre.oyunHavuzu, OTURUM_OYUN_SAYISI, rastgele),
+            oyunNo: 0,
+            skorlar: new Map(
+                bagli.map((o) => [o.id, { id: o.id, ad: o.ad, renk: o.renk, katilmaSirasi: o.katilmaSirasi, puan: 0 }])
             ),
-            kaydedildi: false,
-            ilerlemeDegisti: false,
-            sonIlerlemeYayini: 0,
+            araBitis: null,
+            sonuclandi: false,
         };
-        this.asama = "geri_sayim";
-        this.sonuclar = null;
+        this.cevre.oturumBasladi({
+            id: this.oturum.id,
+            odaKodu: this.kod,
+            oyunlar: this.oturum.oyunlar,
+            baslangic: simdi,
+        });
+        this.turSonuclari = null;
+        this.turuHazirla(simdi);
         this.sonEtkinlik = simdi;
         this.durumuYayinla();
         return null;
     }
 
-    birElDaha(kullaniciId: string, simdi: number): IslemHatasi | null {
+    /** The owner skips the rest of the break between games. */
+    devam(kullaniciId: string, simdi: number): IslemHatasi | null {
+        this.ilerlet(simdi);
+        if (kullaniciId !== this.sahipId) return "yetki_yok";
+        if (this.asama !== "tur_sonucu" || !this.oturum) return "gecersiz_asama";
+        this.oturum.araBitis = simdi;
+        this.ilerlet(simdi);
+        return null;
+    }
+
+    /** From the final standings back to the lobby with the same group. */
+    yeniOturum(kullaniciId: string, simdi: number): IslemHatasi | null {
         this.ilerlet(simdi);
         const oyuncu = this.oyuncular.get(kullaniciId);
         if (!oyuncu) return "yetki_yok";
-        if (this.asama === "sonuc") this.beklemeyeDon();
+        if (this.asama === "bitti") this.beklemeyeDon();
         if (this.asama !== "bekleme") return "gecersiz_asama";
         oyuncu.hazir = true;
         this.sonEtkinlik = simdi;
@@ -233,20 +275,42 @@ export class Oda {
         return null;
     }
 
-    oyunDegistir(kullaniciId: string, oyun: unknown, simdi: number): IslemHatasi | null {
-        this.ilerlet(simdi);
-        if (kullaniciId !== this.sahipId) return "yetki_yok";
-        if (!aileOyunuMu(oyun)) return "gecersiz_oyun";
-        if (this.asama !== "bekleme" && this.asama !== "sonuc") return "gecersiz_asama";
-        this.oyun = oyun;
-        // Readiness given for the previous game never starts the new one.
-        this.beklemeyeDon();
-        this.sonEtkinlik = simdi;
-        this.durumuYayinla();
-        return null;
-    }
+    // ── Rounds ─────────────────────────────────────────────────────────────
 
-    // ── Round ──────────────────────────────────────────────────────────────
+    private turuHazirla(simdi: number) {
+        const oturum = this.oturum!;
+        const oyun = oturum.oyunlar[oturum.oyunNo];
+        const kural = AILE_OYUNLARI[oyun];
+        const icerik = kural.icerikUret((n) => this.cevre.rastgele(n));
+        // Everyone still holding a seat plays, including those briefly offline.
+        const oyuncular = [...oturum.skorlar.values()]
+            .map((s) => this.oyuncular.get(s.id))
+            .filter((o): o is Oyuncu => !!o)
+            .sort((a, b) => a.katilmaSirasi - b.katilmaSirasi);
+        const baslangic = simdi + GERI_SAYIM_MS;
+        this.tur = {
+            id: this.cevre.yeniId(),
+            odaKodu: this.kod,
+            oturumId: oturum.id,
+            oturumSirasi: oturum.oyunNo,
+            oyun,
+            kuralSurumu: kural.kuralSurumu,
+            icerik,
+            baslangic,
+            bitis: baslangic + kural.sureMs,
+            katilimcilar: new Map(
+                oyuncular.map((o) => [
+                    o.id,
+                    { id: o.id, ad: o.ad, renk: o.renk, durum: kural.baslangicDurumu(icerik), sonSira: 0, disarida: null },
+                ])
+            ),
+            kaydedildi: false,
+            ilerlemeDegisti: false,
+            sonIlerlemeYayini: 0,
+        };
+        oturum.araBitis = null;
+        this.asama = "geri_sayim";
+    }
 
     hamle(kullaniciId: string, turId: unknown, sira: unknown, deger: unknown, simdi: number) {
         this.ilerlet(simdi);
@@ -284,10 +348,10 @@ export class Oda {
             yanit(false);
             return;
         }
-        const oncekiIlerleme = kural.ozet(katilimci.durum).ilerleme;
+        const onceki = kural.ozet(katilimci.durum);
         katilimci.durum = sonuc.durum;
         const ozet = kural.ozet(sonuc.durum);
-        if (ozet.ilerleme !== oncekiIlerleme || ozet.bitti) tur.ilerlemeDegisti = true;
+        if (ozet.ilerleme !== onceki.ilerleme || ozet.puan !== onceki.puan || ozet.bitti) tur.ilerlemeDegisti = true;
         this.sonEtkinlik = simdi;
         yanit(true);
         if (ozet.bitti) this.ilerlet(simdi);
@@ -303,6 +367,8 @@ export class Oda {
             this.cevre.turBasladi({
                 id: tur.id,
                 odaKodu: tur.odaKodu,
+                oturumId: tur.oturumId,
+                oturumSirasi: tur.oturumSirasi,
                 oyun: tur.oyun,
                 kuralSurumu: tur.kuralSurumu,
                 icerik: tur.icerik,
@@ -320,20 +386,15 @@ export class Oda {
         let degisti = false;
 
         if (this.oyuncular.size > 0 && pencereDolanlar.length === this.oyuncular.size) {
-            // Everyone is gone: an unfinished round never counts as completed.
+            // Everyone is gone: an unfinished round or session never counts as completed.
             this.kapat();
             return;
         }
 
         for (const oyuncu of pencereDolanlar) {
-            const katilimci = tur?.katilimcilar.get(oyuncu.id);
-            if (this.asama === "oynaniyor" && katilimci) {
-                if (!katilimci.disarida && !this.oyunKurali.ozet(katilimci.durum).bitti) {
-                    katilimci.disarida = "koptu";
-                    tur!.ilerlemeDegisti = true;
-                    degisti = true;
-                }
-            } else if (this.asama === "bekleme" || this.asama === "sonuc") {
+            if (tur?.katilimcilar.has(oyuncu.id)) {
+                if (this.turdanDus(oyuncu.id, "koptu")) degisti = true;
+            } else if (this.asama !== "geri_sayim" && this.asama !== "oynaniyor") {
                 this.oyuncular.delete(oyuncu.id);
                 degisti = true;
             }
@@ -350,11 +411,9 @@ export class Oda {
 
         if (this.asama === "oynaniyor" && tur) {
             const kural = this.oyunKurali;
-            const herkesBitti = [...tur.katilimcilar.values()].every(
-                (k) => k.disarida || kural.ozet(k.durum).bitti
-            );
+            const herkesBitti = [...tur.katilimcilar.values()].every((k) => k.disarida || kural.ozet(k.durum).bitti);
             if (simdi >= tur.bitis || herkesBitti) {
-                this.turuKesinlestir();
+                this.turuKesinlestir(simdi);
                 return;
             }
             if (tur.ilerlemeDegisti && simdi - tur.sonIlerlemeYayini >= ILERLEME_ARALIGI_MS) {
@@ -364,7 +423,12 @@ export class Oda {
             }
         }
 
-        if ((this.asama === "bekleme" || this.asama === "sonuc") && simdi - this.sonEtkinlik >= HAREKETSIZ_ODA_MS) {
+        if (this.asama === "tur_sonucu" && this.oturum?.araBitis != null && simdi >= this.oturum.araBitis) {
+            this.sonrakiOyun(simdi);
+            return;
+        }
+
+        if ((this.asama === "bekleme" || this.asama === "bitti") && simdi - this.sonEtkinlik >= HAREKETSIZ_ODA_MS) {
             this.kapat();
             return;
         }
@@ -372,15 +436,32 @@ export class Oda {
         if (degisti) this.durumuYayinla();
     }
 
-    private turuKesinlestir() {
+    /** Marks a player out of the running round. Returns whether anything changed. */
+    private turdanDus(kullaniciId: string, sebep: "koptu" | "ayrildi") {
+        const katilimci = this.tur?.katilimcilar.get(kullaniciId);
+        if (!katilimci || katilimci.disarida || this.oyunKurali.ozet(katilimci.durum).bitti) return false;
+        katilimci.disarida = sebep;
+        this.tur!.ilerlemeDegisti = true;
+        return true;
+    }
+
+    private turuKesinlestir(simdi: number) {
         const tur = this.tur!;
+        const oturum = this.oturum!;
         const kural = this.oyunKurali;
         const katilimcilar = [...tur.katilimcilar.values()];
+        const durumu = (k: Katilimci): SonucDurumu =>
+            kural.ozet(k.durum).bitti ? "bitirdi" : k.disarida ?? (kural.puanli ? "bitirdi" : "bitiremedi");
+        const oncelik = { bitirdi: 0, bitiremedi: 1, koptu: 2, ayrildi: 2 };
+        const karsilastir = (a: Katilimci, b: Katilimci) =>
+            oncelik[durumu(a)] - oncelik[durumu(b)] || kural.karsilastir(a.durum, b.durum);
+
         const sonuclar: KesinSonuc[] = katilimcilar.map((k) => {
             const ozet = kural.ozet(k.durum);
-            const durum: SonucDurumu = ozet.bitti ? "bitirdi" : k.disarida ?? "bitiremedi";
+            const durum = durumu(k);
             // Shared places: only players strictly better push the rank down.
-            const sira = 1 + katilimcilar.filter((d) => tamKarsilastir(kural, d, k) < 0).length;
+            const sira = 1 + katilimcilar.filter((d) => karsilastir(d, k) < 0).length;
+            const oynadi = durum === "bitirdi" || durum === "bitiremedi";
             return {
                 id: k.id,
                 ad: k.ad,
@@ -393,27 +474,63 @@ export class Oda {
                 nihaiMs: ozet.nihaiMs,
                 ilerleme: ozet.ilerleme,
                 toplam: ozet.toplam,
+                puan: ozet.puan,
+                // First place earns one point per player; dropping out earns none.
+                turPuani: oynadi ? katilimcilar.length - sira + 1 : 0,
                 oyuncuSayisi: katilimcilar.length,
             };
         });
         sonuclar.sort((a, b) => a.sira - b.sira || a.ad.localeCompare(b.ad, "tr"));
+        for (const s of sonuclar) {
+            const skor = oturum.skorlar.get(s.id);
+            if (skor) skor.puan += s.turPuani;
+        }
         this.cevre.turBitti(tur.id, sonuclar);
         this.tur = null;
-        this.sonuclar = sonuclar;
-        this.asama = "sonuc";
-        for (const oyuncu of this.oyuncular.values()) oyuncu.hazir = false;
+        this.turSonuclari = sonuclar;
+
+        const sonOyun = oturum.oyunNo >= oturum.oyunlar.length - 1;
+        if (sonOyun) {
+            this.oturumuBitir(simdi);
+        } else {
+            this.asama = "tur_sonucu";
+            oturum.araBitis = simdi + ARA_MS;
+        }
         this.durumuYayinla();
     }
 
-    private geriSayimiIptalEt() {
-        this.tur = null;
-        this.asama = "bekleme";
+    private sonrakiOyun(simdi: number) {
+        const oturum = this.oturum!;
+        const kalanlar = [...oturum.skorlar.keys()].filter((id) => this.oyuncular.has(id));
+        if (kalanlar.length === 0) {
+            // Only onlookers are left; the session ends with what was played.
+            this.oturumuBitir(simdi);
+        } else {
+            oturum.oyunNo += 1;
+            this.turuHazirla(simdi);
+        }
+        this.durumuYayinla();
+    }
+
+    private oturumuBitir(simdi: number) {
+        const oturum = this.oturum!;
+        oturum.araBitis = null;
+        oturum.sonuclandi = true;
+        this.asama = "bitti";
         for (const oyuncu of this.oyuncular.values()) oyuncu.hazir = false;
+        const toplamlar = this.toplamlar();
+        this.cevre.oturumBitti(
+            oturum.id,
+            toplamlar.map((t) => ({ ...t, oyuncuSayisi: toplamlar.length })),
+            simdi
+        );
+        this.sonEtkinlik = simdi;
     }
 
     private beklemeyeDon() {
         this.asama = "bekleme";
-        this.sonuclar = null;
+        this.oturum = null;
+        this.turSonuclari = null;
         for (const oyuncu of this.oyuncular.values()) oyuncu.hazir = false;
     }
 
@@ -428,6 +545,7 @@ export class Oda {
         if (this.kapali) return;
         this.kapali = true;
         if (this.tur?.kaydedildi) this.cevre.turKesildi(this.tur.id);
+        if (this.oturum && !this.oturum.sonuclandi) this.cevre.oturumKesildi(this.oturum.id);
         this.tur = null;
         for (const oyuncu of this.oyuncular.values()) {
             if (oyuncu.baglantiId) this.cevre.gonder(oyuncu.baglantiId, { t: "kapandi", sebep: "oda_kapandi" });
@@ -437,17 +555,33 @@ export class Oda {
 
     // ── Views ──────────────────────────────────────────────────────────────
 
+    private toplamlar(): ToplamSatiri[] {
+        const skorlar = [...(this.oturum?.skorlar.values() ?? [])];
+        return [...skorlar]
+            .sort((a, b) => b.puan - a.puan || a.katilmaSirasi - b.katilmaSirasi)
+            .map((s) => ({
+                id: s.id,
+                ad: s.ad,
+                renk: s.renk,
+                sira: 1 + skorlar.filter((d) => d.puan > s.puan).length,
+                puan: s.puan,
+                ayrildi: !this.oyuncular.has(s.id),
+            }));
+    }
+
     private benimTurum(k: Katilimci): BenimTurum {
-        const ozet = this.oyunKurali.ozet(k.durum);
-        const durum = k.durum as { beklenen?: number };
+        const kural = this.oyunKurali;
+        const ozet = kural.ozet(k.durum);
         return {
-            beklenen: durum.beklenen ?? 0,
-            hatalar: ozet.hatalar,
             sonSira: k.sonSira,
             bitti: ozet.bitti,
             disarida: k.disarida,
+            ilerleme: ozet.ilerleme,
+            hatalar: ozet.hatalar,
+            puan: ozet.puan,
             hamMs: ozet.hamMs,
             nihaiMs: ozet.nihaiMs,
+            durum: kural.istemciDurumu ? kural.istemciDurumu(k.durum, this.tur!.icerik) : k.durum,
         };
     }
 
@@ -456,17 +590,24 @@ export class Oda {
         if (!tur) return [];
         return [...tur.katilimcilar.values()].map((k) => {
             const ozet = this.oyunKurali.ozet(k.durum);
-            return { id: k.id, ilerleme: ozet.ilerleme, toplam: ozet.toplam, bitti: ozet.bitti, disarida: k.disarida };
+            return {
+                id: k.id,
+                ilerleme: ozet.ilerleme,
+                toplam: ozet.toplam,
+                puan: ozet.puan,
+                bitti: ozet.bitti,
+                disarida: k.disarida,
+            };
         });
     }
 
     gorunum(izleyenId: string): OdaGorunumu {
         const tur = this.tur;
         const katilimci = tur?.katilimcilar.get(izleyenId);
+        const kural = tur ? this.oyunKurali : null;
         return {
             kod: this.kod,
             ad: this.ad,
-            oyun: this.oyun,
             asama: this.asama,
             sahipId: this.sahipId,
             oyuncular: [...this.oyuncular.values()]
@@ -480,19 +621,24 @@ export class Oda {
                     sahip: o.id === this.sahipId,
                     turDisinda: !!tur && !tur.katilimcilar.has(o.id),
                 })),
-            tur: tur
-                ? {
-                      id: tur.id,
-                      oyun: tur.oyun,
-                      kuralSurumu: tur.kuralSurumu,
-                      icerik: tur.icerik as number[],
-                      baslangic: tur.baslangic,
-                      bitis: tur.bitis,
-                      ben: katilimci ? this.benimTurum(katilimci) : null,
-                      ilerlemeler: this.ilerlemeler(),
-                  }
-                : null,
-            sonuclar: this.sonuclar ?? null,
+            oyunlar: this.oturum?.oyunlar ?? null,
+            oyunNo: this.oturum?.oyunNo ?? 0,
+            araBitis: this.oturum?.araBitis ?? null,
+            tur:
+                tur && kural
+                    ? {
+                          id: tur.id,
+                          oyun: tur.oyun,
+                          kuralSurumu: tur.kuralSurumu,
+                          icerik: kural.istemciIcerigi ? kural.istemciIcerigi(tur.icerik) : tur.icerik,
+                          baslangic: tur.baslangic,
+                          bitis: tur.bitis,
+                          ben: katilimci ? this.benimTurum(katilimci) : null,
+                          ilerlemeler: this.ilerlemeler(),
+                      }
+                    : null,
+            turSonuclari: this.turSonuclari,
+            toplamlar: this.toplamlar(),
         };
     }
 
@@ -509,13 +655,4 @@ export class Oda {
             if (oyuncu.baglantiId) this.cevre.gonder(oyuncu.baglantiId, mesaj);
         }
     }
-}
-
-/**
- * Finishers first, then players who ran out of time, then those who dropped
- * or left; inside each group the game's own comparison decides.
- */
-function tamKarsilastir(kural: AileOyunu<unknown, unknown>, a: Katilimci, b: Katilimci) {
-    const oncelik = (k: Katilimci) => (kural.ozet(k.durum).bitti ? 0 : k.disarida ? 2 : 1);
-    return oncelik(a) - oncelik(b) || kural.karsilastir(a.durum, b.durum);
 }

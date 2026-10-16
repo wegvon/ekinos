@@ -18,15 +18,15 @@ export function KatilFormu({ ilkHata }: { ilkHata?: string | null }) {
             setHata("Kod 6 karakter olmalı. Harfleri ve rakamları yeniden kontrol et.");
             return;
         }
-        router.push(`/oda/${temiz}`);
+        router.push(`/oturum/${temiz}`);
     }
 
     return (
         <form className="panel form-card" onSubmit={onSubmit} noValidate>
             <span className="chip green">Ailen seni bekliyor</span>
             <h1 className="spaced">Kod sende mi?</h1>
-            <p className="muted">Odayı kuran kişinin paylaştığı 6 karakterli kodu gir.</p>
-            <label className="field-label spaced" htmlFor="oda-kodu">Oda kodu</label>
+            <p className="muted">Oturumu açan kişinin paylaştığı 6 karakterli kodu gir.</p>
+            <label className="field-label spaced" htmlFor="oda-kodu">Oturum kodu</label>
             <input
                 id="oda-kodu"
                 className="input code-input"
@@ -44,8 +44,8 @@ export function KatilFormu({ ilkHata }: { ilkHata?: string | null }) {
                 aria-describedby={hata ? "kod-hata" : undefined}
             />
             {hata && <p className="error spaced" id="kod-hata" role="alert">{hata}</p>}
-            <button className="btn primary full spaced" type="submit">Odaya katıl <Ikon ad="arrow" /></button>
-            <div className="form-foot"><Link className="text-link" href="/oyna/sayi-avi#oda-kur">Ben oda kuracağım</Link></div>
+            <button className="btn primary full spaced" type="submit">Oturuma katıl <Ikon ad="arrow" /></button>
+            <div className="form-foot"><Link className="text-link" href="/oyna#oturum-ac">Ben oturum açacağım</Link></div>
         </form>
     );
 }

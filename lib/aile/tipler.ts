@@ -1,14 +1,20 @@
-// Wire protocol between the family room server and the room page.
+// Wire protocol between the family session server and the session page.
 // Kept free of server imports so the client bundle can use it too.
+//
+// In the product a group plays an "oturum": five random games in a row.
+// The code keeps the word "oda" for that group, because "oturum" already
+// names login sessions (lib/server/auth.ts).
 
-export type OyunKimligi = "sayi-avi";
-export type OdaAsamasi = "bekleme" | "geri_sayim" | "oynaniyor" | "sonuc";
+export type OyunKimligi = "sayi-avi" | "hafiza-kartlari" | "buyuk-hangisi" | "renk-tuzagi" | "kutu-say";
+export type OdaAsamasi = "bekleme" | "geri_sayim" | "oynaniyor" | "tur_sonucu" | "bitti";
 export type SonucDurumu = "bitirdi" | "bitiremedi" | "koptu" | "ayrildi";
 
 export const ODA_KAPASITESI = 8;
 export const ODA_EN_AZ_OYUNCU = 2;
+export const OTURUM_OYUN_SAYISI = 5;
 export const KOPMA_PENCERESI_MS = 20_000;
 export const GERI_SAYIM_MS = 3_000;
+export const ARA_MS = 10_000;
 export const HAREKETSIZ_ODA_MS = 30 * 60_000;
 export const ILERLEME_ARALIGI_MS = 250;
 
@@ -41,26 +47,32 @@ export interface OyuncuGorunumu {
 export interface IlerlemeGorunumu {
     id: string;
     ilerleme: number;
-    toplam: number;
+    /** Null for open-ended games scored by points. */
+    toplam: number | null;
+    puan: number | null;
     bitti: boolean;
     disarida: SonucDurumu | null;
 }
 
+/** The viewer's own round: the game's own state plus a common summary. */
 export interface BenimTurum {
-    beklenen: number;
-    hatalar: number;
     sonSira: number;
     bitti: boolean;
     disarida: SonucDurumu | null;
+    ilerleme: number;
+    hatalar: number;
+    puan: number | null;
     hamMs: number | null;
     nihaiMs: number | null;
+    durum: unknown;
 }
 
 export interface TurGorunumu {
     id: string;
     oyun: OyunKimligi;
     kuralSurumu: string;
-    icerik: number[];
+    /** Content as the game shows it to players (hidden parts left out). */
+    icerik: unknown;
     baslangic: number;
     bitis: number;
     ben: BenimTurum | null;
@@ -78,27 +90,47 @@ export interface SonucSatiri {
     cezaMs: number;
     nihaiMs: number | null;
     ilerleme: number;
-    toplam: number;
+    toplam: number | null;
+    /** The game's own score (points, or moves for Hafıza Kartları). */
+    puan: number | null;
+    /** Session points this round earned. */
+    turPuani: number;
+}
+
+export interface ToplamSatiri {
+    id: string;
+    ad: string;
+    renk: string;
+    sira: number;
+    puan: number;
+    /** Left the session before the end. */
+    ayrildi: boolean;
 }
 
 export interface OdaGorunumu {
     kod: string;
     ad: string | null;
-    oyun: OyunKimligi;
     asama: OdaAsamasi;
     sahipId: string;
     oyuncular: OyuncuGorunumu[];
+    /** The session's games in play order, once it has started. */
+    oyunlar: OyunKimligi[] | null;
+    /** Index into `oyunlar` of the current (or just finished) game. */
+    oyunNo: number;
+    /** When the break after a round ends and the next game starts. */
+    araBitis: number | null;
     tur: TurGorunumu | null;
-    sonuclar: SonucSatiri[] | null;
+    turSonuclari: SonucSatiri[] | null;
+    toplamlar: ToplamSatiri[];
 }
 
 export type IstemciMesaji =
     | { t: "ping"; c: number }
     | { t: "hazir"; deger: boolean }
     | { t: "baslat" }
+    | { t: "devam" }
     | { t: "hamle"; turId: string; sira: number; deger: number }
-    | { t: "bir_el_daha" }
-    | { t: "oyun_degistir"; oyun: OyunKimligi }
+    | { t: "yeni_oturum" }
     | { t: "ayril" };
 
 export type KatilmaHatasi = "yok" | "dolu" | "tur_suruyor" | "kesildi" | "gecersiz";
@@ -108,7 +140,6 @@ export type IslemHatasi =
     | "gecersiz_asama"
     | "az_oyuncu"
     | "hazir_degil"
-    | "gecersiz_oyun"
     | "cok_hizli";
 
 export type SunucuMesaji =

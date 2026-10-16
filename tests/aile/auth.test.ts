@@ -97,32 +97,48 @@ describe("güvenlik yardımcıları", () => {
     });
 });
 
-describe("tur deposu", () => {
-    it("sonuçları bir kez yazar, profil yalnızca tamamlanan turları gösterir", async () => {
+describe("oturum deposu", () => {
+    it("sonuçları bir kez yazar, profil yalnızca tamamlanan oturumları gösterir", async () => {
         await kayitOl("ali", "parola123");
         const ali = (await girisYap("ali", "parola123"))!;
         const depo = aileDeposu(getDb());
-        const tur = { id: "t1", odaKodu: "ABCDEF", oyun: "sayi-avi" as const, kuralSurumu: "sayi-avi@1", icerik: [1], baslangic: 1, bitis: 2 };
+        depo.oturumBasladi({ id: "o1", odaKodu: "ABCDEF", oyunlar: ["sayi-avi", "kutu-say"], baslangic: 1 });
+        depo.oturumBasladi({ id: "o2", odaKodu: "ABCDEF", oyunlar: ["sayi-avi"], baslangic: 5 });
+        const tur = {
+            id: "t1", odaKodu: "ABCDEF", oturumId: "o1", oturumSirasi: 0, oyun: "sayi-avi" as const,
+            kuralSurumu: "sayi-avi@1", icerik: [1], baslangic: 1, bitis: 2,
+        };
         depo.turBasladi(tur);
-        depo.turBasladi({ ...tur, id: "t2", baslangic: 5 });
         const sonuc = {
             id: ali.id, ad: "ali", renk: "", sira: 1, durum: "bitirdi" as const, hamMs: 10, hata: 0, cezaMs: 0,
-            nihaiMs: 10, ilerleme: 25, toplam: 25, oyuncuSayisi: 2,
+            nihaiMs: 10, ilerleme: 25, toplam: 25, puan: null, turPuani: 2, oyuncuSayisi: 2,
         };
         expect(depo.turBitti("t1", [sonuc])).toBe(true);
         expect(depo.turBitti("t1", [sonuc])).toBe(false);
-        depo.turKesildi("t2");
-        expect(depo.profilGecmisi(ali.id).map((t) => t.turId)).toEqual(["t1"]);
+        const toplam = { id: ali.id, ad: "ali", renk: "", sira: 1, puan: 7, ayrildi: false, oyuncuSayisi: 2 };
+        expect(depo.oturumBitti("o1", [toplam], 9)).toBe(true);
+        expect(depo.oturumBitti("o1", [toplam], 9)).toBe(false);
+        depo.oturumKesildi("o2");
+        expect(depo.profilGecmisi(ali.id)).toEqual([
+            { oturumId: "o1", baslangic: 1, sira: 1, puan: 7, oyuncuSayisi: 2, ayrildi: false, oyunlar: ["sayi-avi", "kutu-say"] },
+        ]);
         expect(depo.sonTurKesildiMi("ABCDEF", 10)).toBe(true);
+        expect(getDb().prepare("SELECT puan, tur_puani FROM aile_sonuclari").get()).toEqual({ puan: null, tur_puani: 2 });
     });
 
-    it("yeniden açılışta süren turlar kesildi olarak işaretlenir", () => {
+    it("yeniden açılışta süren tur ve oturumlar kesildi olarak işaretlenir", () => {
         const dosya = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ekinos-")), "test.db");
         const ilk = veritabaniAc(dosya);
-        aileDeposu(ilk).turBasladi({ id: "t9", odaKodu: "QQQQQQ", oyun: "sayi-avi", kuralSurumu: "x", icerik: [], baslangic: 1, bitis: 2 });
+        const depo = aileDeposu(ilk);
+        depo.oturumBasladi({ id: "o9", odaKodu: "QQQQQQ", oyunlar: ["sayi-avi"], baslangic: 1 });
+        depo.turBasladi({
+            id: "t9", odaKodu: "QQQQQQ", oturumId: "o9", oturumSirasi: 0, oyun: "sayi-avi", kuralSurumu: "x",
+            icerik: [], baslangic: 1, bitis: 2,
+        });
         ilk.close();
         const ikinci = veritabaniAc(dosya);
         expect((ikinci.prepare("SELECT durum FROM aile_turlari").get() as { durum: string }).durum).toBe("kesildi");
+        expect((ikinci.prepare("SELECT durum FROM aile_oyun_oturumlari").get() as { durum: string }).durum).toBe("kesildi");
         ikinci.close();
     });
 });

@@ -2,12 +2,14 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { oyunKarti, sureYaz } from "@/lib/aile/katalog";
-import { SAYI_AVI_CEZA_MS, sayiAvi } from "@/lib/aile/oyunlar/sayi-avi";
+import { useCallback, useEffect, useState } from "react";
+import { AILE_KATALOGU, oyunKarti, sureYaz } from "@/lib/aile/katalog";
+import { AILE_OYUNLARI } from "@/lib/aile/oyunlar";
+import type { AileOyunu } from "@/lib/aile/oyunlar/oyun";
 import {
     ODA_EN_AZ_OYUNCU,
     ODA_KAPASITESI,
+    OTURUM_OYUN_SAYISI,
     type BenimTurum,
     type IlerlemeGorunumu,
     type IslemHatasi,
@@ -17,55 +19,56 @@ import {
     type TurGorunumu,
 } from "@/lib/aile/tipler";
 import { Avatar, Ikon } from "../Ikon";
+import { OyunTahtasi, type GeriBildirim } from "./OyunTahtalari";
 import { useOda, type HamleYaniti, type Son } from "./useOda";
 
-// The whole room lives on one page: lobby → countdown → board → results.
+// The whole session lives on one page: lobby → (countdown → board → round
+// results) × 5 → final standings.
 
 interface YerelTur {
     turId: string;
-    beklenen: number;
-    hatalar: number;
     sira: number;
-    bitti: boolean;
+    /** The game's own state for games we can predict; the server's view otherwise. */
+    durum: unknown;
 }
 
-function yereldenSunucuya(turId: string, ben: BenimTurum): YerelTur {
-    return { turId, beklenen: ben.beklenen, hatalar: ben.hatalar, sira: ben.sonSira, bitti: ben.bitti };
-}
+const kuralOf = (tur: TurGorunumu) => AILE_OYUNLARI[tur.oyun] as AileOyunu<unknown, unknown>;
+/** Games whose state the page can work out itself (no hidden content). */
+const tahminli = (tur: TurGorunumu) => !kuralOf(tur).istemciDurumu;
 
 const ISLEM_HATALARI: Record<IslemHatasi, string> = {
-    yetki_yok: "Bunu yalnızca oda sahibi yapabilir.",
+    yetki_yok: "Bunu yalnızca oturum sahibi yapabilir.",
     gecersiz_asama: "Bu adım şu anda yapılamıyor.",
     az_oyuncu: `Başlamak için en az ${ODA_EN_AZ_OYUNCU} bağlı oyuncu gerekiyor.`,
     hazir_degil: "Herkes hazır olunca başlatabilirsin.",
-    gecersiz_oyun: "Bu oyun için aile modu yok.",
     cok_hizli: "Çok hızlı dokunuyorsun; birkaç dokunuş sayılmadı.",
 };
 
 export function OdaIstemci({ kod, benAdi }: { kod: string; benAdi: string }) {
     const router = useRouter();
     const [yerel, setYerel] = useState<YerelTur | null>(null);
-    const [yanlis, setYanlis] = useState<number | null>(null);
+    const [geriBildirim, setGeriBildirim] = useState<GeriBildirim | null>(null);
 
     const hamleYaniti = useCallback((y: HamleYaniti) => {
         setYerel((onceki) => {
             if (!onceki || onceki.turId !== y.turId) return onceki;
             // A rejected move, or the reply to our latest move, is the truth.
-            if (!y.kabul || y.sira >= onceki.sira) return yereldenSunucuya(y.turId, y.ben);
+            if (!y.kabul || y.sira >= onceki.sira) return { turId: y.turId, sira: y.ben.sonSira, durum: y.ben.durum };
             return onceki;
         });
     }, []);
 
     const { oda, benId, baglanti, son, islemHatasi, gonder, sunucuZamani, yenidenDene } = useOda(kod, hamleYaniti);
-    const simdi = useSunucuSaati(sunucuZamani, !!oda?.tur);
+    const simdi = useSunucuSaati(sunucuZamani, !!oda?.tur || oda?.araBitis != null);
 
     // Adopt the server's view of our board on a new round or after reconnecting.
     const tur = oda?.tur ?? null;
     useEffect(() => {
         if (!tur?.ben) return;
+        const ben = tur.ben;
         setYerel((onceki) =>
-            !onceki || onceki.turId !== tur.id || tur.ben!.sonSira >= onceki.sira
-                ? yereldenSunucuya(tur.id, tur.ben!)
+            !onceki || onceki.turId !== tur.id || ben.sonSira >= onceki.sira
+                ? { turId: tur.id, sira: ben.sonSira, durum: ben.durum }
                 : onceki
         );
     }, [tur?.id, tur?.ben]);
@@ -74,40 +77,29 @@ export function OdaIstemci({ kod, benAdi }: { kod: string; benAdi: string }) {
         if (son?.tur === "kapandi" && son.sebep === "ayrildin") router.push("/oyna");
     }, [son, router]);
 
-    // Remember a cancelled countdown so the lobby can say why.
-    const oncekiAsama = useRef(oda?.asama);
-    const [iptalNotu, setIptalNotu] = useState(false);
-    useEffect(() => {
-        if (oncekiAsama.current === "geri_sayim" && oda?.asama === "bekleme") setIptalNotu(true);
-        if (oda?.asama !== "bekleme") setIptalNotu(false);
-        oncekiAsama.current = oda?.asama;
-    }, [oda?.asama]);
-
     const dokun = useCallback(
         (deger: number) => {
-            if (!tur || !yerel || yerel.turId !== tur.id || yerel.bitti || baglanti !== "acik") return;
+            if (!tur || !yerel || yerel.turId !== tur.id || baglanti !== "acik" || tur.ben?.disarida) return;
             const zaman = sunucuZamani();
-            if (zaman < tur.baslangic || zaman >= tur.bitis || tur.ben?.disarida) return;
-            if (deger < yerel.beklenen) return;
-            const sonuc = sayiAvi.hamleUygula(
-                { beklenen: yerel.beklenen, hatalar: yerel.hatalar, bitisMs: null },
-                deger,
-                zaman - tur.baslangic,
-                tur.icerik
-            );
+            if (zaman < tur.baslangic || zaman >= tur.bitis) return;
+            const kural = kuralOf(tur);
+            let durum = yerel.durum;
+            if (tahminli(tur)) {
+                if (kural.ozet(durum).bitti) return;
+                const sonuc = kural.hamleUygula(durum, deger, zaman - tur.baslangic, tur.icerik);
+                // Harmless taps (an already-found number) are not sent.
+                if (!sonuc.kabul || sonuc.durum === durum) return;
+                const hataOldu = kural.ozet(sonuc.durum).hatalar > kural.ozet(durum).hatalar;
+                durum = sonuc.durum;
+                const bildirim = { deger, dogru: !hataOldu, an: zaman };
+                setGeriBildirim(bildirim);
+                setTimeout(() => setGeriBildirim((g) => (g === bildirim ? null : g)), 300);
+            } else if (tur.ben?.bitti) {
+                return;
+            }
             const sira = yerel.sira + 1;
             if (!gonder({ t: "hamle", turId: tur.id, sira, deger })) return;
-            setYerel({
-                turId: tur.id,
-                sira,
-                beklenen: sonuc.durum.beklenen,
-                hatalar: sonuc.durum.hatalar,
-                bitti: sonuc.durum.bitisMs !== null,
-            });
-            if (deger > yerel.beklenen) {
-                setYanlis(deger);
-                setTimeout(() => setYanlis((y) => (y === deger ? null : y)), 300);
-            }
+            setYerel({ turId: tur.id, sira, durum });
         },
         [tur, yerel, baglanti, gonder, sunucuZamani]
     );
@@ -116,50 +108,46 @@ export function OdaIstemci({ kod, benAdi }: { kod: string; benAdi: string }) {
     if (!oda || !benId) {
         return (
             <div className="narrow panel" aria-live="polite">
-                <span className="chip outline">Oda · {kod}</span>
-                <h1 className="spaced">{baglanti === "koptu" ? "Bağlanamadık, tekrar deniyoruz." : "Odaya bağlanıyoruz…"}</h1>
+                <span className="chip outline">Oturum · {kod}</span>
+                <h1 className="spaced">{baglanti === "koptu" ? "Bağlanamadık, tekrar deniyoruz." : "Oturuma bağlanıyoruz…"}</h1>
             </div>
         );
     }
 
     const ben = oda.oyuncular.find((o) => o.id === benId);
-    const ortak = { oda, benId, gonder, baglanti };
+    const ortak = { oda, benId, gonder, baglanti, simdi };
+    const yerelDurum = tur && yerel?.turId === tur.id ? yerel.durum : tur?.ben?.durum;
+    const yerelBitti = !!tur && tahminli(tur) && yerelDurum !== undefined && kuralOf(tur).ozet(yerelDurum).bitti;
 
     return (
         <>
             {baglanti !== "acik" && (
                 <p className="banner warn" role="status">
                     <strong>Seni yeniden bağlıyoruz.</strong>{" "}
-                    {oda.asama === "oynaniyor" ? "Turun süresi devam ediyor; bu sırada dokunuşlar kapalı." : "Bağlantın dönünce kaldığın yerden devam edeceksin."}
+                    {oda.asama === "oynaniyor" ? "Oyunun süresi devam ediyor; bu sırada dokunuşlar kapalı." : "Bağlantın dönünce kaldığın yerden devam edeceksin."}
                 </p>
             )}
             {islemHatasi && <p className="banner warn" role="alert">{ISLEM_HATALARI[islemHatasi]}</p>}
 
-            {oda.asama === "bekleme" && <Bekleme {...ortak} iptalNotu={iptalNotu} />}
+            {oda.asama === "bekleme" && <Bekleme {...ortak} />}
             {(oda.asama === "geri_sayim" || oda.asama === "oynaniyor") && tur && (
                 ben?.turDisinda || !tur.ben ? (
                     <TurDisinda oda={oda} tur={tur} benId={benId} />
                 ) : simdi < tur.baslangic ? (
-                    <GeriSayim oda={oda} kalanMs={tur.baslangic - simdi} />
-                ) : tur.ben.bitti || tur.ben.disarida || yerel?.bitti ? (
+                    <GeriSayim oda={oda} tur={tur} kalanMs={tur.baslangic - simdi} />
+                ) : tur.ben.bitti || tur.ben.disarida || yerelBitti ? (
                     <BitirdinBekle oda={oda} tur={tur} benId={benId} benAdi={benAdi} ben={tur.ben} />
                 ) : (
-                    <Oyun
-                        {...ortak}
-                        tur={tur}
-                        yerel={yerel}
-                        yanlis={yanlis}
-                        kalanMs={tur.bitis - simdi}
-                        dokun={dokun}
-                    />
+                    <Oyun {...ortak} tur={tur} durum={yerelDurum} geriBildirim={geriBildirim} dokun={dokun} />
                 )
             )}
-            {oda.asama === "sonuc" && <Sonuclar {...ortak} />}
+            {oda.asama === "tur_sonucu" && <TurSonucu {...ortak} />}
+            {oda.asama === "bitti" && <OturumSonucu {...ortak} />}
         </>
     );
 }
 
-/** Re-renders on a short interval while a round is on screen. */
+/** Re-renders on a short interval while a round or a break is on screen. */
 function useSunucuSaati(sunucuZamani: () => number, aktif: boolean) {
     const [simdi, setSimdi] = useState(() => sunucuZamani());
     useEffect(() => {
@@ -176,20 +164,24 @@ interface Ortak {
     benId: string;
     gonder: ReturnType<typeof useOda>["gonder"];
     baglanti: ReturnType<typeof useOda>["baglanti"];
+    simdi: number;
+}
+
+function oyunNoYaz(oda: OdaGorunumu) {
+    return `Oyun ${oda.oyunNo + 1} / ${oda.oyunlar?.length ?? OTURUM_OYUN_SAYISI}`;
 }
 
 // ── Lobby ──────────────────────────────────────────────────────────────────
 
-function Bekleme({ oda, benId, gonder, baglanti, iptalNotu }: Ortak & { iptalNotu: boolean }) {
+function Bekleme({ oda, benId, gonder, baglanti }: Ortak) {
     const ben = oda.oyuncular.find((o) => o.id === benId)!;
     const sahibim = oda.sahipId === benId;
     const bagli = oda.oyuncular.filter((o) => o.bagli);
     const herkesHazir = bagli.length >= ODA_EN_AZ_OYUNCU && bagli.every((o) => o.hazir);
-    const karti = oyunKarti(oda.oyun);
     const sahip = oda.oyuncular.find((o) => o.sahip);
     const acik = baglanti === "acik";
 
-    let baslatNotu = "Turu başlattığında herkes aynı geri sayımı görecek.";
+    let baslatNotu = "Başlattığında ilk oyun herkeste aynı anda açılacak.";
     if (bagli.length < ODA_EN_AZ_OYUNCU) baslatNotu = "En az bir kişinin daha katılması gerekiyor.";
     else if (!herkesHazir) baslatNotu = "Herkes “Hazırım” deyince başlatabilirsin.";
 
@@ -197,20 +189,17 @@ function Bekleme({ oda, benId, gonder, baglanti, iptalNotu }: Ortak & { iptalNot
         <>
             <div className="page-title">
                 <div>
-                    <span className="eyebrow muted">Oyun odası</span>
-                    <h1 className="spaced">{oda.ad ?? `${sahip?.ad ?? "Ailenin"} odası`}</h1>
-                    <p>{sahibim ? "Kodu paylaş, herkes gelince birlikte başlayın." : `${sahip?.ad ?? "Oda sahibi"} turu başlatacak. Hazır olunca haber ver.`}</p>
+                    <span className="eyebrow muted">Oyun oturumu</span>
+                    <h1 className="spaced">{oda.ad ?? `${sahip?.ad ?? "Ailenin"} oturumu`}</h1>
+                    <p>{sahibim ? "Kodu paylaş, herkes gelince birlikte başlayın." : `${sahip?.ad ?? "Oturum sahibi"} oturumu başlatacak. Hazır olunca haber ver.`}</p>
                 </div>
                 <span className="chip green"><span className="dot" />{oda.oyuncular.length} / {ODA_KAPASITESI} oyuncu</span>
             </div>
-            {iptalNotu && (
-                <p className="banner info" role="status">Geri sayım durdu: bir oyuncunun bağlantısı koptu ya da ayrıldı. Yeniden hazır olun.</p>
-            )}
             <div className="room-layout">
                 <div className="panel">
-                    <OdaKodu kod={oda.kod} />
+                    <OturumKodu kod={oda.kod} />
                     <div className="section-heading">
-                        <h2>Masadakiler</h2>
+                        <h2>Oturumdakiler</h2>
                         {herkesHazir && <span className="chip green">Herkes hazır</span>}
                     </div>
                     <div className="player-list" aria-live="polite">
@@ -218,10 +207,10 @@ function Bekleme({ oda, benId, gonder, baglanti, iptalNotu }: Ortak & { iptalNot
                     </div>
                 </div>
                 <aside className="panel room-settings">
-                    <span className="eyebrow muted">Sıradaki oyun</span>
+                    <span className="eyebrow muted">Bu oturumda</span>
                     <div className="room-game">
-                        <h3>{karti.ad}</h3>
-                        <p>1’den 25’e, sırayla.<br />90 saniye · Yanlış dokunuş +2 sn</p>
+                        <h3>{OTURUM_OYUN_SAYISI} oyun, rastgele sırayla</h3>
+                        <p>{AILE_KATALOGU.map((k) => k.ad).join(" · ")}</p>
                     </div>
                     <button
                         type="button"
@@ -240,16 +229,16 @@ function Bekleme({ oda, benId, gonder, baglanti, iptalNotu }: Ortak & { iptalNot
                                 onClick={() => gonder({ t: "baslat" })}
                                 disabled={!acik || !herkesHazir}
                             >
-                                Hep birlikte başlayalım <Ikon ad="arrow" />
+                                Oturumu başlat <Ikon ad="arrow" />
                             </button>
                             <p className="note spaced">{baslatNotu}</p>
                         </>
                     )}
                     <div className="room-tip">
-                        <strong>Aynı oyun, kendi ekranın.</strong>Telefonu elden ele dolaştırmaya gerek yok. Herkes kendi cihazından oynasın.
+                        <strong>Her oyunda puan toplanır.</strong>Birinci, oyuncu sayısı kadar puan alır; sonuncu 1 puan. En çok puanı toplayan oturumu kazanır.
                     </div>
                     <button type="button" className="text-link spaced" onClick={() => gonder({ t: "ayril" })}>
-                        Odadan ayrıl
+                        Oturumdan ayrıl
                     </button>
                 </aside>
             </div>
@@ -257,13 +246,13 @@ function Bekleme({ oda, benId, gonder, baglanti, iptalNotu }: Ortak & { iptalNot
     );
 }
 
-function OdaKodu({ kod }: { kod: string }) {
+function OturumKodu({ kod }: { kod: string }) {
     const [kopyalandi, setKopyalandi] = useState(false);
     async function paylas() {
-        const url = `${window.location.origin}/oda/${kod}`;
+        const url = `${window.location.origin}/oturum/${kod}`;
         try {
             if (navigator.share) {
-                await navigator.share({ title: "Ekinos odası", text: `Oda kodu: ${kod}`, url });
+                await navigator.share({ title: "Ekinos oturumu", text: `Oturum kodu: ${kod}`, url });
                 return;
             }
             await navigator.clipboard.writeText(url);
@@ -278,7 +267,7 @@ function OdaKodu({ kod }: { kod: string }) {
             <div>
                 <span className="eyebrow">Katılma kodu</span>
                 <br />
-                <strong aria-label={`Oda kodu ${kod.split("").join(" ")}`}>{kod}</strong>
+                <strong aria-label={`Oturum kodu ${kod.split("").join(" ")}`}>{kod}</strong>
                 <p>Ailene bu kodu söyle.</p>
             </div>
             <button type="button" className="text-link" onClick={paylas}>
@@ -295,7 +284,7 @@ function OyuncuSatiri({ oyuncu, benim }: { oyuncu: OyuncuGorunumu; benim: boolea
             <Avatar ad={oyuncu.ad} renk={oyuncu.renk} />
             <div className="person">
                 <strong>{oyuncu.ad}{benim && <span className="muted"> · Sen</span>}</strong>
-                <small>{oyuncu.sahip ? "Oda sahibi" : "Oyuncu"}</small>
+                <small>{oyuncu.sahip ? "Oturum sahibi" : "Oyuncu"}</small>
             </div>
             {!oyuncu.bagli ? (
                 <span className="offline"><Ikon ad="wifiOff" />Bağlantı bekleniyor</span>
@@ -310,15 +299,16 @@ function OyuncuSatiri({ oyuncu, benim }: { oyuncu: OyuncuGorunumu; benim: boolea
 
 // ── Countdown and play ────────────────────────────────────────────────────
 
-function GeriSayim({ oda, kalanMs }: { oda: OdaGorunumu; kalanMs: number }) {
+function GeriSayim({ oda, tur, kalanMs }: { oda: OdaGorunumu; tur: TurGorunumu; kalanMs: number }) {
     const sayi = Math.min(3, Math.max(1, Math.ceil(kalanMs / 1000)));
+    const kart = oyunKarti(tur.oyun);
     return (
         <div className="narrow countdown-card">
             <div>
-                <span className="chip green">{oyunKarti(oda.oyun).ad} · {oda.tur?.ilerlemeler.length ?? 0} oyuncu</span>
-                <h1 className="spaced">Gözler ekranda.</h1>
+                <span className="chip green">{oyunNoYaz(oda)} · {tur.ilerlemeler.length} oyuncu</span>
+                <h1 className="spaced">{kart.ad}</h1>
                 <div className="countdown-number" role="timer" aria-live="assertive">{sayi}</div>
-                <p className="muted">Birazdan herkes aynı anda başlıyor.</p>
+                <p className="muted">{kart.ipucu}</p>
             </div>
         </div>
     );
@@ -336,78 +326,58 @@ function Oyun({
     benId,
     gonder,
     baglanti,
+    simdi,
     tur,
-    yerel,
-    yanlis,
-    kalanMs,
+    durum,
+    geriBildirim,
     dokun,
 }: Ortak & {
     tur: TurGorunumu;
-    yerel: YerelTur | null;
-    yanlis: number | null;
-    kalanMs: number;
+    durum: unknown;
+    geriBildirim: GeriBildirim | null;
     dokun: (deger: number) => void;
 }) {
     const [ayrilOnayi, setAyrilOnayi] = useState(false);
-    const beklenen = yerel?.beklenen ?? 1;
     const kapali = baglanti !== "acik";
+    const kart = oyunKarti(tur.oyun);
+    const ozet = tahminli(tur) && durum !== undefined ? kuralOf(tur).ozet(durum) : tur.ben;
     return (
         <div className="arena">
             <div>
                 <div className="game-stage">
                     <div className="game-status">
                         <div>
-                            {oda.ad && <span className="eyebrow muted">{oda.ad}</span>}
-                            <h1>Sayı Avı</h1>
+                            <span className="eyebrow muted">{oyunNoYaz(oda)}</span>
+                            <h1>{kart.ad}</h1>
                         </div>
-                        <span className="timer" role="timer" aria-label="Kalan süre">{sayac(kalanMs)}</span>
+                        <span className="timer" role="timer" aria-label="Kalan süre">{sayac(tur.bitis - simdi)}</span>
                     </div>
-                    <div className="game-target">
-                        <span>Sıradaki sayı <strong>{beklenen}</strong></span>
-                        <span>{beklenen - 1} / 25 buldun{yerel?.hatalar ? ` · ${yerel.hatalar} hata` : ""}</span>
-                    </div>
-                    <div className="board-wrap">
-                        <div className="number-board" role="group" aria-label="Sayı tahtası" aria-disabled={kapali}>
-                            {tur.icerik.map((n) => (
-                                <button
-                                    key={n}
-                                    type="button"
-                                    className={n === beklenen - 1 ? "last" : n < beklenen ? "complete" : n === yanlis ? "wrong" : undefined}
-                                    onPointerDown={(e) => {
-                                        // Respond on touch-down; the click that follows is ignored.
-                                        if (e.pointerType !== "mouse" || e.button === 0) dokun(n);
-                                    }}
-                                    onKeyDown={(e) => {
-                                        if (e.key === "Enter" || e.key === " ") {
-                                            e.preventDefault();
-                                            dokun(n);
-                                        }
-                                    }}
-                                >
-                                    {n}
-                                </button>
-                            ))}
-                        </div>
-                        {kapali && <div className="board-cover" role="status">Bağlantı bekleniyor…</div>}
-                    </div>
-                    <p className="game-caption">1’den 25’e sırayla dokun. Yanlış dokunuş sonucuna 2 sn ekler.</p>
+                    {durum !== undefined && (
+                        <OyunTahtasi tur={tur} durum={durum} geriBildirim={geriBildirim} dokun={dokun} kapali={kapali} />
+                    )}
+                    <p className="game-caption">{kart.ipucu}</p>
                 </div>
                 <div className="game-exit">
                     {ayrilOnayi ? (
-                        <div className="state-strip" role="alertdialog" aria-label="Odadan ayrılma onayı">
-                            <strong>Odadan ayrılalım mı?</strong>
-                            <p>Bu turdaki sonucun “ayrıldı” olarak görünür. Diğerleri oynamaya devam eder.</p>
+                        <div className="state-strip" role="alertdialog" aria-label="Oturumdan ayrılma onayı">
+                            <strong>Oturumdan ayrılalım mı?</strong>
+                            <p>Bu oyundaki sonucun “ayrıldı” olarak görünür ve kalan oyunlardan puan alamazsın.</p>
                             <div className="row wrap">
                                 <button type="button" className="btn primary" onClick={() => setAyrilOnayi(false)}>Oyunda kal</button>
                                 <button type="button" className="btn secondary" onClick={() => gonder({ t: "ayril" })}>Evet, ayrıl</button>
                             </div>
                         </div>
                     ) : (
-                        <button type="button" className="text-link" onClick={() => setAyrilOnayi(true)}>Odadan ayrıl</button>
+                        <button type="button" className="text-link" onClick={() => setAyrilOnayi(true)}>Oturumdan ayrıl</button>
                     )}
                 </div>
             </div>
-            <IlerlemeListesi oda={oda} benId={benId} ilerlemeler={tur.ilerlemeler} benimIlerleme={beklenen - 1} />
+            <IlerlemeListesi
+                oda={oda}
+                benId={benId}
+                ilerlemeler={tur.ilerlemeler}
+                ben={ozet ? { ilerleme: ozet.ilerleme, puan: ozet.puan } : undefined}
+            />
         </div>
     );
 }
@@ -416,31 +386,40 @@ function IlerlemeListesi({
     oda,
     benId,
     ilerlemeler,
-    benimIlerleme,
+    ben,
 }: {
     oda: OdaGorunumu;
     benId: string;
     ilerlemeler: IlerlemeGorunumu[];
-    benimIlerleme?: number;
+    ben?: { ilerleme: number; puan: number | null };
 }) {
+    // Our own line follows our taps without waiting for the next broadcast.
+    const satirlar = ilerlemeler.map((i) =>
+        i.id === benId && ben ? { ...i, ilerleme: Math.max(ben.ilerleme, i.ilerleme), puan: ben.puan ?? i.puan } : i
+    );
+    const enYuksek = Math.max(1, ...satirlar.map((i) => i.puan ?? 0));
     return (
         <aside className="progress-list" aria-label="Oyuncuların ilerlemesi">
             <h2>Aynı anda oynuyoruz</h2>
-            {ilerlemeler.map((i) => {
+            {satirlar.map((i) => {
                 const oyuncu = oda.oyuncular.find((o) => o.id === i.id);
                 const benim = i.id === benId;
-                const deger = benim && benimIlerleme !== undefined ? Math.max(benimIlerleme, i.ilerleme) : i.ilerleme;
                 const ad = oyuncu?.ad ?? "Ayrılan oyuncu";
+                const oran = i.toplam !== null ? i.ilerleme / i.toplam : (i.puan ?? 0) / enYuksek;
+                const metin =
+                    i.disarida === "koptu" ? "Koptu"
+                    : i.disarida === "ayrildi" ? "Ayrıldı"
+                    : i.bitti ? "Bitirdi"
+                    : i.toplam !== null ? `${i.ilerleme} / ${i.toplam}`
+                    : `${i.puan ?? 0} puan`;
                 return (
                     <div key={i.id} className={benim ? "progress-player self" : "progress-player"}>
                         <div className="progress-head">
                             <Avatar ad={ad} renk={oyuncu?.renk ?? "#e2e5d9"} />
                             <strong>{ad}{benim && " · Sen"}</strong>
-                            <span>
-                                {i.disarida === "koptu" ? "Koptu" : i.disarida === "ayrildi" ? "Ayrıldı" : i.bitti ? "Bitirdi" : `${deger} / ${i.toplam}`}
-                            </span>
+                            <span>{metin}</span>
                         </div>
-                        <div className="track"><span style={{ width: `${(deger / i.toplam) * 100}%` }} /></div>
+                        <div className="track"><span style={{ width: `${Math.min(1, oran) * 100}%` }} /></div>
                     </div>
                 );
             })}
@@ -450,22 +429,17 @@ function IlerlemeListesi({
 
 function BitirdinBekle({ oda, tur, benId, benAdi, ben }: { oda: OdaGorunumu; tur: TurGorunumu; benId: string; benAdi: string; ben: BenimTurum }) {
     const devamEdenler = tur.ilerlemeler.filter((i) => !i.bitti && !i.disarida).length;
-    const baslik = ben.disarida === "koptu" ? "Bağlantın uzun süre koptu." : ben.bitti ? `Güzel turdu, ${benAdi}.` : "Sonucun kesinleşiyor…";
+    const baslik = ben.disarida === "koptu" ? "Bağlantın uzun süre koptu." : ben.bitti ? `Güzel oyundu, ${benAdi}.` : "Sonucun kesinleşiyor…";
     return (
         <div className="arena">
             <div className="panel" aria-live="polite">
-                <span className="chip green"><Ikon ad="check" />{ben.bitti ? "Sen tamamladın" : "Tur sürüyor"}</span>
+                <span className="chip green"><Ikon ad="check" />{ben.bitti ? "Sen tamamladın" : "Oyun sürüyor"}</span>
                 <h1 className="spaced">{baslik}</h1>
-                {ben.bitti && (
-                    <p className="muted spaced">
-                        Sonucun: {sureYaz(ben.nihaiMs)}
-                        {ben.hatalar > 0 && ` (${sureYaz(ben.hamMs)} + ${ben.hatalar} hata × ${SAYI_AVI_CEZA_MS / 1000} sn)`}.
-                    </p>
-                )}
-                {ben.disarida === "koptu" && <p className="muted spaced">Bu turda “bağlantı koptu” olarak görüneceksin. Tur bitince sonuçları birlikte göreceksiniz.</p>}
+                {ben.bitti && <p className="muted spaced">Sonucun: {benimSonucum(tur.oyun, ben)}.</p>}
+                {ben.disarida === "koptu" && <p className="muted spaced">Bu oyunda “bağlantı koptu” olarak görüneceksin. Sonraki oyuna katılabilirsin.</p>}
                 <div className="state-strip">
                     <strong>{devamEdenler > 0 ? "Diğer oyuncular bekleniyor" : "Sonuçlar hazırlanıyor"}</strong>
-                    <p>Turun 90 saniyelik süresi dolunca sonuçlar otomatik açılır.</p>
+                    <p>Süre dolunca sonuçlar otomatik açılır.</p>
                 </div>
             </div>
             <IlerlemeListesi oda={oda} benId={benId} ilerlemeler={tur.ilerlemeler} />
@@ -473,13 +447,21 @@ function BitirdinBekle({ oda, tur, benId, benAdi, ben }: { oda: OdaGorunumu; tur
     );
 }
 
+function benimSonucum(oyun: TurGorunumu["oyun"], ben: BenimTurum) {
+    if (oyun === "sayi-avi") {
+        return `${sureYaz(ben.nihaiMs)}${ben.hatalar > 0 ? ` (${sureYaz(ben.hamMs)} + ${ben.hatalar} hata × 2 sn)` : ""}`;
+    }
+    if (oyun === "hafiza-kartlari") return `${ben.puan} hamle, ${sureYaz(ben.nihaiMs)}`;
+    return `${ben.puan} puan`;
+}
+
 function TurDisinda({ oda, tur, benId }: { oda: OdaGorunumu; tur: TurGorunumu; benId: string }) {
     return (
         <div className="arena">
             <div className="panel">
-                <span className="chip outline">Tur sürüyor</span>
-                <h1 className="spaced">Bu tur sensiz başladı.</h1>
-                <p className="muted spaced">Tur bitince sonuçları birlikte göreceksiniz; bir sonraki elde sen de varsın.</p>
+                <span className="chip outline">{oyunNoYaz(oda)}</span>
+                <h1 className="spaced">Bu oturum sensiz başladı.</h1>
+                <p className="muted spaced">Oyunları buradan izleyebilirsin. Oturum bitince bir sonrakinde sen de varsın.</p>
             </div>
             <IlerlemeListesi oda={oda} benId={benId} ilerlemeler={tur.ilerlemeler} />
         </div>
@@ -495,68 +477,149 @@ const DURUM_ETIKETI: Record<SonucSatiri["durum"], string> = {
     ayrildi: "Ayrıldı",
 };
 
-function Sonuclar({ oda, benId, gonder, baglanti }: Ortak) {
-    const sonuclar = oda.sonuclar ?? [];
-    const kazananlar = sonuclar.filter((s) => s.sira === 1 && s.durum === "bitirdi").map((s) => s.ad);
-    const baslik =
-        kazananlar.length === 1
-            ? `Bu turun yıldızı ${kazananlar[0]}!`
-            : kazananlar.length > 1
-              ? `${kazananlar.join(" ve ")} birinciliği paylaştı!`
-              : "Bu tur kimse bitiremedi.";
+function sonucMetni(oyun: TurGorunumu["oyun"], s: SonucSatiri) {
+    if (s.durum === "koptu" || s.durum === "ayrildi") return null;
+    switch (oyun) {
+        case "sayi-avi":
+            return s.durum === "bitirdi" ? `${sureYaz(s.nihaiMs)}${s.hata ? ` · ${s.hata} hata` : ""}` : `${s.ilerleme} / ${s.toplam} sayı`;
+        case "hafiza-kartlari":
+            return s.durum === "bitirdi" ? `${s.puan} hamle · ${sureYaz(s.nihaiMs)}` : `${s.ilerleme} / ${s.toplam} çift`;
+        default:
+            return `${s.puan ?? 0} puan`;
+    }
+}
+
+function kazananBasligi(adlar: string[], tekil: (ad: string) => string, yok: string) {
+    if (adlar.length === 1) return tekil(adlar[0]);
+    if (adlar.length > 1) return `${adlar.join(" ve ")} birinciliği paylaştı!`;
+    return yok;
+}
+
+function TurSonucTablosu({ oyun, sonuclar, benId }: { oyun: TurGorunumu["oyun"]; sonuclar: SonucSatiri[]; benId: string }) {
+    return (
+        <table className="result-table">
+            <thead>
+                <tr>
+                    <th scope="col">Sıra</th>
+                    <th scope="col">Oyuncu</th>
+                    <th scope="col">Sonuç</th>
+                    <th scope="col">Puan</th>
+                </tr>
+            </thead>
+            <tbody>
+                {sonuclar.map((s) => {
+                    const metin = sonucMetni(oyun, s);
+                    return (
+                        <tr key={s.id} className={s.sira === 1 && s.turPuani > 0 ? "winner" : undefined}>
+                            <td className="rank">{s.sira}</td>
+                            <td>
+                                <span className="row">
+                                    <Avatar ad={s.ad} renk={s.renk} />
+                                    <strong>{s.ad}{s.id === benId && " · Sen"}</strong>
+                                </span>
+                            </td>
+                            <td>{metin ?? <span className="status-chip bad">{DURUM_ETIKETI[s.durum]}</span>}</td>
+                            <td><strong>+{s.turPuani}</strong></td>
+                        </tr>
+                    );
+                })}
+            </tbody>
+        </table>
+    );
+}
+
+function ToplamTablosu({ oda, benId }: { oda: OdaGorunumu; benId: string }) {
+    return (
+        <table className="result-table">
+            <thead>
+                <tr>
+                    <th scope="col">Sıra</th>
+                    <th scope="col">Oyuncu</th>
+                    <th scope="col">Toplam</th>
+                </tr>
+            </thead>
+            <tbody>
+                {oda.toplamlar.map((t) => (
+                    <tr key={t.id} className={t.sira === 1 ? "winner" : undefined}>
+                        <td className="rank">{t.sira}</td>
+                        <td>
+                            <span className="row">
+                                <Avatar ad={t.ad} renk={t.renk} />
+                                <strong>{t.ad}{t.id === benId && " · Sen"}</strong>
+                                {t.ayrildi && <span className="status-chip bad">Ayrıldı</span>}
+                            </span>
+                        </td>
+                        <td><strong>{t.puan} puan</strong></td>
+                    </tr>
+                ))}
+            </tbody>
+        </table>
+    );
+}
+
+function TurSonucu({ oda, benId, gonder, baglanti, simdi }: Ortak) {
+    const sonuclar = oda.turSonuclari ?? [];
+    const oyun = oda.oyunlar![oda.oyunNo];
+    const sonraki = oda.oyunlar![oda.oyunNo + 1];
+    const kalan = Math.max(0, Math.ceil(((oda.araBitis ?? simdi) - simdi) / 1000));
+    const birinciler = sonuclar.filter((s) => s.sira === 1 && s.turPuani > 0).map((s) => s.ad);
     return (
         <div className="narrow">
             <div className="result-heading">
                 <span className="result-mark" aria-hidden="true"><Ikon ad="trophy" /></span>
-                <span className="eyebrow muted">{oyunKarti(oda.oyun).ad} · Tur tamamlandı</span>
-                <h1 className="spaced">{baslik}</h1>
-                <p>Bir el daha? Her tur yeni bir şans.</p>
+                <span className="eyebrow muted">{oyunNoYaz(oda)} · {oyunKarti(oyun).ad}</span>
+                <h1 className="spaced">{kazananBasligi(birinciler, (ad) => `Bu oyunun yıldızı ${ad}!`, "Bu oyunda kimse puan alamadı.")}</h1>
             </div>
             <div className="panel">
-                <table className="result-table">
-                    <caption className="muted" style={{ textAlign: "left", paddingBottom: 12, fontSize: 12 }}>
-                        Düşük sonuç daha iyi
-                    </caption>
-                    <thead>
-                        <tr>
-                            <th scope="col">Sıra</th>
-                            <th scope="col">Oyuncu</th>
-                            <th scope="col">Ham süre</th>
-                            <th scope="col">Hata</th>
-                            <th scope="col">Sonuç</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {sonuclar.map((s) => (
-                            <tr key={s.id} className={s.sira === 1 && s.durum === "bitirdi" ? "winner" : undefined}>
-                                <td className="rank">{s.sira}</td>
-                                <td>
-                                    <span className="row">
-                                        <Avatar ad={s.ad} renk={s.renk} />
-                                        <strong>{s.ad}{s.id === benId && " · Sen"}</strong>
-                                    </span>
-                                </td>
-                                <td>{s.durum === "bitirdi" ? sureYaz(s.hamMs) : `${s.ilerleme} / ${s.toplam}`}</td>
-                                <td>{s.hata}</td>
-                                <td>
-                                    {s.durum === "bitirdi" ? (
-                                        <strong>{sureYaz(s.nihaiMs)}</strong>
-                                    ) : (
-                                        <span className="status-chip bad">{DURUM_ETIKETI[s.durum]}</span>
-                                    )}
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-                <p className="note spaced">Sonuç = ham süre + her hata için 2 saniye. Bitiremeyenler bulduğu sayıya göre sıralanır.</p>
+                <TurSonucTablosu oyun={oyun} sonuclar={sonuclar} benId={benId} />
+            </div>
+            <div className="panel spaced">
+                <h2>Toplam puan</h2>
+                <ToplamTablosu oda={oda} benId={benId} />
+            </div>
+            <div className="state-strip" role="status">
+                <strong>Sıradaki: {oyunKarti(sonraki).ad}</strong>
+                <p>{kalan} saniye sonra herkeste aynı anda başlıyor.</p>
+                {oda.sahipId === benId && (
+                    <button type="button" className="btn primary" onClick={() => gonder({ t: "devam" })} disabled={baglanti !== "acik"}>
+                        Hemen başlat <Ikon ad="arrow" />
+                    </button>
+                )}
             </div>
             <div className="result-actions">
-                <button type="button" className="btn primary" onClick={() => gonder({ t: "bir_el_daha" })} disabled={baglanti !== "acik"}>
-                    Bir el daha
+                <button type="button" className="text-link" onClick={() => gonder({ t: "ayril" })}>Oturumdan ayrıl</button>
+            </div>
+        </div>
+    );
+}
+
+function OturumSonucu({ oda, benId, gonder, baglanti }: Ortak) {
+    const birinciler = oda.toplamlar.filter((t) => t.sira === 1).map((t) => t.ad);
+    const sonOyun = oda.oyunlar?.[oda.oyunNo];
+    return (
+        <div className="narrow">
+            <div className="result-heading">
+                <span className="result-mark" aria-hidden="true"><Ikon ad="trophy" /></span>
+                <span className="eyebrow muted">Oturum tamamlandı</span>
+                <h1 className="spaced">{kazananBasligi(birinciler, (ad) => `Oturumun yıldızı ${ad}!`, "Oturum bitti.")}</h1>
+                <p>{oda.oyunlar?.slice(0, oda.oyunNo + 1).map((o) => oyunKarti(o).ad).join(" · ")}</p>
+            </div>
+            <div className="panel">
+                <ToplamTablosu oda={oda} benId={benId} />
+                <p className="note spaced">Her oyunda birinci oyuncu sayısı kadar puan aldı, sonuncu 1 puan. Kopan veya ayrılan o oyundan puan alamadı.</p>
+            </div>
+            {oda.turSonuclari && sonOyun && (
+                <details className="panel spaced">
+                    <summary>Son oyun: {oyunKarti(sonOyun).ad}</summary>
+                    <TurSonucTablosu oyun={sonOyun} sonuclar={oda.turSonuclari} benId={benId} />
+                </details>
+            )}
+            <div className="result-actions">
+                <button type="button" className="btn primary" onClick={() => gonder({ t: "yeni_oturum" })} disabled={baglanti !== "acik"}>
+                    Aynı ekiple yeni oturum
                 </button>
                 <button type="button" className="btn secondary" onClick={() => gonder({ t: "ayril" })}>
-                    Odadan ayrıl
+                    Oturumdan ayrıl
                 </button>
             </div>
         </div>
@@ -566,36 +629,36 @@ function Sonuclar({ oda, benId, gonder, baglanti }: Ortak) {
 // ── Terminal states ───────────────────────────────────────────────────────
 
 function SonEkrani({ son, yenidenDene }: { son: Son; yenidenDene: () => void }) {
-    let baslik = "Oda kapandı.";
-    let metin = "Yeni bir oda kurabilir ya da başka bir kodla katılabilirsin.";
+    let baslik = "Oturum kapandı.";
+    let metin = "Yeni bir oturum açabilir ya da başka bir kodla katılabilirsin.";
     let tekrar: string | null = null;
     if (son.tur === "katilamadi") {
         switch (son.kod) {
             case "yok":
             case "gecersiz":
-                baslik = "Bu kodla açık bir oda bulamadık.";
-                metin = "Kod yanlış olabilir veya oda kapanmış olabilir. Ailenin paylaştığı kodu yeniden kontrol et.";
+                baslik = "Bu kodla açık bir oturum bulamadık.";
+                metin = "Kod yanlış olabilir veya oturum kapanmış olabilir. Ailenin paylaştığı kodu yeniden kontrol et.";
                 break;
             case "dolu":
-                baslik = "Bu oda dolu.";
-                metin = `Bir odada en fazla ${ODA_KAPASITESI} kişi oynayabilir.`;
+                baslik = "Bu oturum dolu.";
+                metin = `Bir oturumda en fazla ${ODA_KAPASITESI} kişi oynayabilir.`;
                 break;
             case "tur_suruyor":
-                baslik = "Tur sürüyor; birazdan tekrar dene.";
-                metin = "Bu tur bitince odaya katılabilirsin.";
+                baslik = "Bu oturum başladı bile.";
+                metin = "Oyunlar bitince oturuma katılabilir, bir sonrakinde birlikte oynayabilirsiniz.";
                 tekrar = "Tekrar dene";
                 break;
             case "kesildi":
-                baslik = "Bu odadaki tur kesildi.";
-                metin = "Sunucu yeniden başladığı için tur yarıda kaldı ve kaydedilmedi. Yeni bir oda kurup tekrar oynayabilirsiniz.";
+                baslik = "Bu oturum yarıda kesildi.";
+                metin = "Sunucu yeniden başladığı için oturum yarıda kaldı. Yeni bir oturum açıp tekrar oynayabilirsiniz.";
                 break;
         }
     } else if (son.sebep === "baska_yerde") {
-        baslik = "Bu odayı başka bir yerde açtın.";
-        metin = "Aynı hesapla başka bir sekmede veya cihazda bu odadasın. Buradan devam etmek istersen odayı buraya al.";
+        baslik = "Bu oturumu başka bir yerde açtın.";
+        metin = "Aynı hesapla başka bir sekmede veya cihazda bu oturumdasın. Buradan devam etmek istersen oturumu buraya al.";
         tekrar = "Buraya al";
     } else if (son.sebep === "ayrildin") {
-        baslik = "Odadan ayrıldın.";
+        baslik = "Oturumdan ayrıldın.";
     }
     return (
         <div className="panel form-card" role="status">
