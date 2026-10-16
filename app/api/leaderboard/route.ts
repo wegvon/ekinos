@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validateRotatingSchulteScore, isRotatingSchulteSessionTimingValid } from '@/lib/rotating-schulte-rules';
-import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { getD1Uyumlu } from "@/lib/server/db";
 import { isDigitSpanLeaderboardMode, validateDigitSpanSubmission, type DigitSpanSubmissionDetails } from "@/lib/digit-span";
 import { isBlockMemoryLeaderboardMode, validateBlockMemorySubmission } from "@/lib/block-memory-game";
 import { TRAIL_LEADERBOARD_MODE, validateTrailSubmission, type TrailSubmissionDetails } from "@/lib/trail-making";
@@ -90,19 +90,12 @@ async function hasLeaderboardDetailsColumn(db: D1DatabaseBinding) {
     }
 }
 
-async function getCloudflareBindings() {
-    const { env } = await getCloudflareContext({ async: true });
-    const bindings = env as unknown as Record<string, unknown>;
-    const db = bindings?.DB;
-    const bucket = bindings?.ASSETS_BUCKET;
-
-    if (!db) {
-        throw new Error("Cloudflare D1 binding 'DB' is not available.");
-    }
-
+async function getBindings() {
+    // Leaderboard snapshots were an R2 cache; without a bucket every read is
+    // rebuilt from SQLite, which is cheap at family scale.
     return {
-        db: db as D1DatabaseBinding,
-        bucket: bucket as R2Bucket | undefined,
+        db: getD1Uyumlu() as D1DatabaseBinding,
+        bucket: undefined as R2Bucket | undefined,
     };
 }
 
@@ -566,7 +559,7 @@ export async function GET(req: NextRequest) {
             return NextResponse.json({ error: "Unsupported Trail Making mode" }, { status: 400 });
         }
 
-        const { db, bucket } = await getCloudflareBindings();
+        const { db, bucket } = await getBindings();
 
         if (aggregate === "modeCounts") {
             const rows = await db.prepare(
@@ -747,7 +740,7 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: validationError }, { status: 400 });
         }
 
-        const { db, bucket } = await getCloudflareBindings();
+        const { db, bucket } = await getBindings();
         const playerName = await generateStableName(playerId);
         if (gameId === 'rotating-schulte-table') {
             const now = Date.now();
