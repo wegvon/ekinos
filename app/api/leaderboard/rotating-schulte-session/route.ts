@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCloudflareContext } from '@opennextjs/cloudflare';
+import { getD1Uyumlu } from '@/lib/server/db';
 import { ROTATING_SCHULTE_SESSION_TTL_MS } from '@/lib/rotating-schulte-rules';
 
 export async function POST(req: NextRequest) {
@@ -9,8 +9,7 @@ export async function POST(req: NextRequest) {
     if (typeof playerId !== 'string' || !/^[a-zA-Z0-9_-]{8,64}$/.test(playerId)) {
       return NextResponse.json({ error: 'Invalid player ID' }, { status: 400 });
     }
-    const { env } = await getCloudflareContext({ async: true });
-    const db = (env as unknown as { DB: D1Database }).DB;
+    const db = getD1Uyumlu();
     const now = Date.now();
     const sessionId = crypto.randomUUID().replace(/-/g, '');
     // Replacing a player's session also invalidates their unfinished previous run.
