@@ -4,8 +4,25 @@ import { NextRequest, NextResponse } from "next/server";
 
 const handleI18nRouting = createMiddleware(routing);
 
+const AILE_HESAP_YOLLARI = /^\/(giris|kayit|sifre)\/?$/;
+const AILE_KORUNAN_YOLLAR = /^\/(oyna|katil|profil|oda)(\/|$)/;
+
 export default async function middleware(request: NextRequest) {
     const pathname = request.nextUrl.pathname;
+
+    // Family app: its own Turkish routes, outside the locale-prefixed site.
+    if (AILE_HESAP_YOLLARI.test(pathname)) {
+        return NextResponse.next();
+    }
+    if (AILE_KORUNAN_YOLLAR.test(pathname)) {
+        // Cheap early bounce; the server layout still validates the session.
+        if (!request.cookies.has("ekinos_oturum")) {
+            const giris = new URL("/giris", request.url);
+            giris.searchParams.set("sonra", pathname);
+            return NextResponse.redirect(giris);
+        }
+        return NextResponse.next();
+    }
 
     // sitemap.xml 和 robots.txt 直接放行
     if (pathname === '/sitemap.xml' || pathname === '/robots.txt') {
@@ -59,6 +76,6 @@ export const config = {
     // 匹配所有路径除了API、静态资源、sitemap.xml、robots.txt等
     matcher: [
         // 包含所有页面路径，但排除 sitemap.xml 和 robots.txt 以及常见的静态资源文件
-        "/((?!api|embedded|_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|mp3|wav|ogg|mp4|webm|txt|xml|json)$).*)",
+        "/((?!api|ws|embedded|_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|mp3|wav|ogg|mp4|webm|txt|xml|json)$).*)",
     ],
 };

@@ -492,7 +492,7 @@ export class Oda {
                       ilerlemeler: this.ilerlemeler(),
                   }
                 : null,
-            sonuclar: this.sonuclar?.map(({ oyuncuSayisi: _, ...satir }) => satir) ?? null,
+            sonuclar: this.sonuclar ?? null,
         };
     }
 

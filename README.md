@@ -45,7 +45,7 @@ Explore the [full game collection](https://www.freefocusgames.com/games) for mor
 - **UI components**: [Radix UI](https://www.radix-ui.com/) and [shadcn/ui](https://ui.shadcn.com/)
 - **Animation**: Motion and Canvas Confetti
 - **Internationalization**: next-intl, with English and Chinese translations
-- **Hosting and storage**: Cloudflare Workers, D1, and R2 via the OpenNext Cloudflare adapter
+- **Runtime and storage**: one Node.js process (`server.ts`) serving Next.js and a WebSocket room server, with SQLite (better-sqlite3); shipped as a Docker image
 
 ## 🚀 Getting Started
 
@@ -65,20 +65,34 @@ npm run dev
 
 Open [http://localhost:3003](http://localhost:3003).
 
-The development command starts Next.js with Turbopack. Most gameplay runs in the browser; leaderboard features also need the D1 schema and Cloudflare bindings configured in `wrangler.jsonc`. Database migrations are stored in `drizzle/`. Configure your own Cloudflare resources before deploying a fork.
-
-To check TypeScript types:
+The development command runs `server.ts`, which starts Next.js (Turbopack) and the family room WebSocket on `/ws`. Data is stored in SQLite at `data/ekinos.db` (override with `DATABASE_PATH`); migrations in `drizzle/` are applied on startup.
 
 ```bash
-npm run typecheck
+npm run typecheck   # TypeScript
+npm test            # server tests; the end-to-end suite needs `npm run build` first
 ```
 
-To build and deploy to Cloudflare, use `npm run deploy`. CI also uses the
-OpenNext deployment command so the prerender cache is included in Workers
-Static Assets. Pages and the sitemap are cached from the build and refreshed
-on each deployment; leaderboard and speech API routes remain dynamic. This
-avoids rendering static content on each request without adding a cache bucket
-or a revalidation queue. `npm run preview` populates the same cache locally.
+## 👨‍👩‍👧 Ekinos family app
+
+Turkish, account-based rooms where 2–8 family members play the same puzzle at the same time on their own devices. Routes: `/kayit`, `/giris`, `/oyna`, `/katil`, `/oda/KOD`, `/profil`. The public site under `/` and `/zh` is unchanged.
+
+- **Accounts**: username + password only (Argon2id hashes, HttpOnly session cookie). No e-mail.
+- **Rooms**: in memory, in this single process. A restart ends running rounds (shown as "kesildi"); accounts and finished rounds stay in SQLite.
+- **Password reset**: there is no e-mail recovery. An operator issues a temporary password, which the user must change at next sign-in:
+  `node dist/hesap-sifre-sifirla.js <username>` inside the container (`npm run hesap:sifre-sifirla -- <username>` in development).
+
+### Running with Docker / Coolify
+
+```bash
+docker build -t ekinos .
+docker run -p 3000:3000 -v ekinos-data:/data ekinos
+```
+
+- Mount a persistent volume at `/data` (holds `ekinos.db`); back it up like any SQLite file.
+- Serve it over HTTPS behind the proxy and make sure WebSocket upgrades on `/ws` are passed through (Coolify's Traefik does this by default).
+- `APP_ORIGIN` (e.g. `https://ekinos.example`) pins the allowed origin for sign-in and room requests; without it the forwarded `Host` is used.
+- Run a single instance: rooms live in process memory.
+- Plain-HTTP testing on a LAN needs `COOKIE_SECURE=false`, otherwise browsers drop the session cookie.
 
 ## 📄 License
 
