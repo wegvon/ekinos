@@ -49,6 +49,7 @@ export async function sunucuyuBaslat(opts: { dev: boolean; port: number; hostnam
         if (!kaynakGecerli(req.headers)) return reddet(403, "Forbidden");
         const kullanici = oturumKullanicisi(cerezdenToken(req.headers.cookie));
         if (!kullanici) return reddet(401, "Unauthorized");
+        if (kullanici.sifreDegismeli) return reddet(403, "Forbidden");
         if (!sinir("odaKodu").dene(`${istemciAdresi(req.headers)}:${kullanici.id}`)) {
             return reddet(429, "Too Many Requests");
         }
