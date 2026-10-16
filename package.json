@@ -18,7 +18,7 @@
     "translate-blogs:force": "node scripts/translate-blog-posts.js --force",
     "seo:audit": "node build-scripts/seo/audit.mjs",
     "typecheck": "tsc --noEmit",
-    "build:server": "esbuild server.ts scripts/hesap-sifre-sifirla.ts --bundle --platform=node --target=node22 --format=cjs --packages=external --outdir=dist --entry-names=[name] --tsconfig=tsconfig.json",
+    "build:server": "esbuild ./server.ts ./scripts/hesap-sifre-sifirla.ts --bundle --platform=node --target=node22 --format=cjs --packages=external --outdir=dist --entry-names=[name] --tsconfig=tsconfig.json",
     "test": "vitest run",
     "hesap:sifre-sifirla": "tsx scripts/hesap-sifre-sifirla.ts"
   },
